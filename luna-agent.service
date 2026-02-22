@@ -1,0 +1,18 @@
+[Unit]
+Description=Luna Agent - Custom AI Assistant
+After=network-online.target worker-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fabio
+WorkingDirectory=/home/fabio/luna-agent
+Environment="DISCORD_TOKEN="
+ExecStart=/home/fabio/luna-agent/.venv/bin/python -m luna
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

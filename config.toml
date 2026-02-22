@@ -1,0 +1,25 @@
+[llm]
+endpoint = "http://localhost:8001/v1"
+model = "worker-agent"
+max_tokens = 8192
+temperature = 1.0
+
+[discord]
+# token loaded from DISCORD_TOKEN env var
+
+[memory]
+db_path = "data/memory.db"
+embedding_model = "nomic-ai/nomic-embed-text-v1.5"
+embedding_dimensions = 384
+top_k = 10
+chunk_size = 500
+summary_interval = 50
+rrf_k = 60
+importance_threshold = 3.0
+recency_weight = 0.3
+
+[observe]
+log_dir = "data/logs"
+log_level = "INFO"
+web_dashboard = false
+web_port = 8900

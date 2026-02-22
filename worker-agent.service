@@ -1,0 +1,26 @@
+[Unit]
+Description=Worker Agent - Qwen3-Coder-Next LLM Server
+After=network-online.target
+
+[Service]
+Type=simple
+User=fabio
+Environment="CUDA_VISIBLE_DEVICES=0,1"
+ExecStart=/home/fabio/unsloth/llama.cpp/build/bin/llama-server \
+    --model /data/models/Qwen3-Coder-Next-UD-Q4_K_XL.gguf \
+    --host 0.0.0.0 \
+    --port 8001 \
+    --n-gpu-layers 99 \
+    --ctx-size 131072 \
+    --cache-type-k q8_0 \
+    --cache-type-v q8_0 \
+    -fa on \
+    --jinja \
+    --alias worker-agent
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
