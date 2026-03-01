@@ -18,6 +18,10 @@ rrf_k = 60
 importance_threshold = 3.0
 recency_weight = 0.3
 
+[agent]
+workspace = "data/workspace"
+allow_read_outside = true
+
 [observe]
 log_dir = "data/logs"
 log_level = "INFO"

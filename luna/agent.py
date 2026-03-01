@@ -10,21 +10,48 @@ from luna.llm import LLMClient
 from luna.memory import MemoryManager
 from luna.mcp_manager import MCPManager
 from luna.observe import get_logger, log_event, log_duration
+from luna.tools import NATIVE_TOOLS, is_native_tool, call_native_tool
 
 logger = get_logger("agent")
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are Luna, a helpful AI assistant. You have persistent memory and access to tools.
+You are Luna, an AI assistant running on Fabio's homelab. You are knowledgeable, precise, and concise. \
+You think step by step on complex problems but keep routine answers brief.
+
+## Capabilities
+You have persistent memory (facts survive across sessions), access to a bash shell, the local filesystem, \
+and the web. You can read/write files, run commands, search the internet, and fetch web pages.
+
+## Tool Usage
+- **bash**: System commands, git, scripts, process management. Check exit codes — non-zero means failure.
+- **read_file / write_file**: File I/O. Relative paths resolve to the workspace. Writes outside workspace are blocked.
+- **list_directory**: Browse the filesystem before reading specific files.
+- **web_search**: Search the web via DuckDuckGo when you need current information, documentation, or facts you're unsure about.
+- **web_fetch**: Fetch and read a specific URL. Use after web_search to get details from a result.
+- **delegate**: Hand off a self-contained subtask to a sub-agent with its own tool loop. \
+Use for multi-step research, complex file operations, or anything that benefits from focused context.
+- **list_available_tools / use_tool**: Discover and call additional MCP tools beyond the built-ins.
+
+## Guidelines
+- Verify before acting: check file existence before editing, check service status before restarting.
+- Break complex tasks into steps. Use tools iteratively rather than guessing.
+- When a command fails, read the error and adjust — don't retry blindly.
+- If you're unsure, say so. Offer to look it up rather than fabricating answers.
+- For file creation, use relative paths — they resolve to the workspace below.
+
+## Memory
+The "Relevant Memories" section below contains facts retrieved from your long-term memory based on \
+the current conversation. These may include user preferences, past decisions, project details, or \
+previously learned facts. Not all retrieved memories will be relevant — use judgment.
 
 {memory_section}
 {summary_section}
 
 Current time: {current_time}
+Workspace: {workspace}"""
 
-Be concise and helpful. Use tools when they would help answer the user's question."""
 
-
-def _build_system_prompt(memories: list, summary: str | None, current_time: str) -> str:
+def _build_system_prompt(memories: list, summary: str | None, current_time: str, workspace: str = "") -> str:
     memory_section = ""
     if memories:
         mem_lines = []
@@ -40,7 +67,47 @@ def _build_system_prompt(memories: list, summary: str | None, current_time: str)
         memory_section=memory_section,
         summary_section=summary_section,
         current_time=current_time,
+        workspace=workspace,
     )
+
+
+# Patterns that indicate tool execution problems
+_ERROR_PATTERNS: list[tuple[str, str]] = [
+    ("connection refused", "The target service may be down."),
+    ("permission denied", "Permission issue — may need sudo or different path."),
+    ("no such file or directory", "File/path does not exist."),
+    ("command not found", "Command is not installed or not in PATH."),
+    ("timed out", "Operation timed out — consider a longer timeout or simpler approach."),
+    ("name or service not known", "DNS resolution failed — check the hostname."),
+    ("disk quota exceeded", "Out of disk space."),
+    ("connection timed out", "Network timeout — host may be unreachable."),
+]
+
+
+def _verify_tool_result(tool_name: str, result: str) -> str:
+    """Check a tool result for common problems and annotate if issues found.
+
+    Returns the result string, possibly with a [NOTE] appended.
+    Pure string matching — no LLM calls.
+    """
+    if not result or result.strip() == "(no output)":
+        return result + "\n[NOTE: Tool returned empty/no output. Verify the command was correct.]"
+
+    result_lower = result.lower()
+
+    # Check for non-zero exit codes in bash output
+    if "(exit code:" in result_lower and "(exit code: 0)" not in result_lower:
+        for pattern, hint in _ERROR_PATTERNS:
+            if pattern in result_lower:
+                return result + f"\n[NOTE: {hint}]"
+        return result + "\n[NOTE: Command exited with non-zero status. Check the output for errors.]"
+
+    # Check for error patterns even without exit codes (web_fetch, MCP tools, etc.)
+    for pattern, hint in _ERROR_PATTERNS:
+        if pattern in result_lower:
+            return result + f"\n[NOTE: {hint}]"
+
+    return result
 
 
 class Agent:
@@ -69,11 +136,11 @@ class Agent:
         # 3. Build prompt
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
-        system = _build_system_prompt(memories, summary, now)
+        system = _build_system_prompt(memories, summary, now, self.config.agent.workspace)
         recent = self.memory.get_recent_messages(session_id, limit=20)
 
-        # 4. Get available tools
-        tools = self.mcp.get_all_tools()
+        # 4. Get available tools (native only; MCP tools accessed via meta-tools)
+        tools = NATIVE_TOOLS
 
         # 5. Build message list
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
@@ -103,11 +170,18 @@ class Agent:
             for tc in response.tool_calls:
                 log_event(logger, "tool_executing", tool=tc.name, session_id=session_id)
                 try:
-                    result = await self.mcp.call_tool(tc.name, tc.arguments)
+                    if is_native_tool(tc.name):
+                        result = await call_native_tool(
+                            tc.name, tc.arguments,
+                            context=message, llm=self.llm,
+                        )
+                    else:
+                        result = await self.mcp.call_tool(tc.name, tc.arguments)
                 except Exception as e:
                     result = f"Tool error: {e}"
                     logger.exception(f"Tool call failed: {tc.name}")
 
+                result = _verify_tool_result(tc.name, result)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -119,6 +193,12 @@ class Agent:
 
         if rounds >= self.max_tool_rounds:
             log_event(logger, "tool_loop_limit", session_id=session_id, rounds=rounds)
+            # Ask the LLM to wrap up without tools
+            messages.append({
+                "role": "user",
+                "content": "You have reached the tool call limit. Please respond to the user with what you have so far. Do not call any more tools.",
+            })
+            response = await self.llm.chat(messages)
 
         # 8. Save assistant response
         content = response.content or "(no response)"

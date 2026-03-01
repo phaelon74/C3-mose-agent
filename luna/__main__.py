@@ -14,6 +14,7 @@ from luna.memory import MemoryManager
 from luna.mcp_manager import MCPManager
 from luna.agent import Agent
 from luna.discord_bot import LunaDiscordBot
+from luna.tools import init_workspace, init_tool_registry
 
 
 async def main() -> None:
@@ -24,6 +25,9 @@ async def main() -> None:
     logger = get_logger("main")
     log_event(logger, "startup", llm_endpoint=config.llm.endpoint)
 
+    # Initialize workspace sandbox
+    init_workspace(config.agent.workspace, config.agent.allow_read_outside)
+
     # Initialize components
     llm = LLMClient(config.llm)
     memory = MemoryManager(config.memory)
@@ -31,6 +35,7 @@ async def main() -> None:
     mcp = MCPManager()
     mcp_config_path = config.root_dir / "mcp_servers.json"
     await mcp.load_servers(mcp_config_path)
+    init_tool_registry(mcp)
 
     agent = Agent(config, llm, memory, mcp)
 

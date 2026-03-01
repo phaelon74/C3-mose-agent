@@ -129,6 +129,7 @@ class MemoryManager:
                 self.config.embedding_model,
                 truncate_dim=self.config.embedding_dimensions,
                 trust_remote_code=True,
+                device="cpu",
             )
             log_event(logger, "embedder_loaded", model=self.config.embedding_model)
         return self._embedder

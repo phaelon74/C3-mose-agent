@@ -49,11 +49,18 @@ class ObserveConfig:
 
 
 @dataclass
+class AgentConfig:
+    workspace: str = "data/workspace"
+    allow_read_outside: bool = True
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     observe: ObserveConfig = field(default_factory=ObserveConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     root_dir: Path = _ROOT
 
 
@@ -82,6 +89,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.memory, raw["memory"])
         if "observe" in raw:
             _apply_section(cfg.observe, raw["observe"])
+        if "agent" in raw:
+            _apply_section(cfg.agent, raw["agent"])
 
     # Env var overrides
     if token := os.environ.get("DISCORD_TOKEN"):
@@ -100,5 +109,7 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.memory.db_path = str(cfg.root_dir / cfg.memory.db_path)
     if not Path(cfg.observe.log_dir).is_absolute():
         cfg.observe.log_dir = str(cfg.root_dir / cfg.observe.log_dir)
+    if not Path(cfg.agent.workspace).is_absolute():
+        cfg.agent.workspace = str(cfg.root_dir / cfg.agent.workspace)
 
     return cfg

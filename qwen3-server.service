@@ -1,5 +1,5 @@
 [Unit]
-Description=Worker Agent - Qwen3-Coder-Next Q4_K_XL llama-server (dual RTX 3090)
+Description=Qwen3-Coder-Next llama-server (dual RTX 3090)
 After=network-online.target
 
 [Service]
@@ -8,8 +8,8 @@ User=fabio
 WorkingDirectory=/home/fabio/unsloth
 Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
 ExecStart=/home/fabio/unsloth/llama.cpp/build/bin/llama-server \
-  --model /data/models/Qwen3-Coder-Next-UD-Q4_K_XL.gguf \
-  --alias "worker-agent" \
+  --model /home/fabio/unsloth/models/Qwen3-Coder-Next-IQ4_XS.gguf \
+  --alias "unsloth/Qwen3-Coder-Next" \
   --host 0.0.0.0 \
   --port 8001 \
   --n-gpu-layers 999 \

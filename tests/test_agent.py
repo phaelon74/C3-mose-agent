@@ -8,7 +8,7 @@ import pytest
 
 from luna.config import Config
 from luna.llm import LLMClient, LLMResponse
-from luna.agent import Agent, _build_system_prompt
+from luna.agent import Agent, _build_system_prompt, _verify_tool_result
 from luna.memory import MemoryResult, MemoryManager
 
 
@@ -30,6 +30,10 @@ class TestSystemPrompt:
     def test_with_summary(self):
         prompt = _build_system_prompt([], "They discussed AI.", "2026-01-01T00:00:00Z")
         assert "They discussed AI." in prompt
+
+    def test_with_workspace(self):
+        prompt = _build_system_prompt([], None, "2026-01-01T00:00:00Z", workspace="/home/fabio/workspace")
+        assert "/home/fabio/workspace" in prompt
 
 
 class TestAgent:
@@ -70,3 +74,53 @@ class TestAgent:
         assert len(messages) == 2
         assert messages[0]["role"] == "user"
         assert messages[1]["role"] == "assistant"
+
+
+class TestVerifyToolResult:
+    def test_clean_result_unchanged(self):
+        result = "file1.txt\nfile2.txt"
+        assert _verify_tool_result("bash", result) == result
+
+    def test_nonzero_exit_code_flagged(self):
+        result = "ls: cannot access '/nope': No such file or directory\n(exit code: 2)"
+        verified = _verify_tool_result("bash", result)
+        assert "[NOTE:" in verified
+        assert "does not exist" in verified
+
+    def test_nonzero_exit_code_generic(self):
+        result = "some obscure error\n(exit code: 1)"
+        verified = _verify_tool_result("bash", result)
+        assert "[NOTE:" in verified
+        assert "non-zero" in verified.lower()
+
+    def test_empty_output_flagged(self):
+        result = "(no output)"
+        verified = _verify_tool_result("bash", result)
+        assert "[NOTE:" in verified
+        assert "empty" in verified.lower()
+
+    def test_connection_refused_flagged(self):
+        result = "curl: (7) Failed to connect to localhost port 9999: Connection refused\n(exit code: 7)"
+        verified = _verify_tool_result("bash", result)
+        assert "[NOTE:" in verified
+        assert "down" in verified.lower()
+
+    def test_permission_denied_flagged(self):
+        result = "cat: /etc/shadow: Permission denied\n(exit code: 1)"
+        verified = _verify_tool_result("bash", result)
+        assert "[NOTE:" in verified
+        assert "permission" in verified.lower()
+
+    def test_successful_output_not_flagged(self):
+        result = "hello world"
+        assert _verify_tool_result("bash", result) == result
+
+    def test_zero_exit_code_not_flagged(self):
+        result = "output here\n(exit code: 0)"
+        assert _verify_tool_result("bash", result) == result
+
+    def test_error_pattern_without_exit_code(self):
+        result = "Error fetching URL: Name or service not known"
+        verified = _verify_tool_result("web_fetch", result)
+        assert "[NOTE:" in verified
+        assert "DNS" in verified
