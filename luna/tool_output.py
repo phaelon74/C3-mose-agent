@@ -23,6 +23,7 @@ class LLMExtractor(Protocol):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
     ) -> Any: ...
 
 

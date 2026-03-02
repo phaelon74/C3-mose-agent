@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import unittest.mock
 
 import pytest
 
@@ -39,7 +40,7 @@ class TestToolRegistry:
         assert names == {
             "bash", "read_file", "write_file", "list_directory",
             "web_fetch", "web_search", "list_available_tools", "use_tool",
-            "delegate",
+            "summarize_paper", "delegate",
         }
 
     def test_is_native_tool(self):
@@ -478,3 +479,93 @@ class TestDelegateTool:
         messages = call_args[0][0]
         system_msg = messages[0]["content"]
         assert "project X" in system_msg
+
+
+class TestSummarizePaper:
+    def _mock_arxiv_paper(self):
+        """Create a mock arXiv paper object."""
+        paper = MagicMock()
+        paper.title = "TestNet: A Novel Method for Testing"
+        author1 = MagicMock()
+        author1.name = "Alice Smith"
+        author2 = MagicMock()
+        author2.name = "Bob Jones"
+        paper.authors = [author1, author2]
+        paper.summary = (
+            "We present TestNet, a novel approach to automated testing. "
+            "Our method achieves 95.2% accuracy on the TestBench dataset, "
+            "outperforming the previous state-of-the-art by 3.1%."
+        )
+        return paper
+
+    @pytest.mark.asyncio
+    async def test_missing_arxiv_id(self):
+        result = await call_native_tool("summarize_paper", {})
+        assert "Error" in result
+        assert "arxiv_id" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_llm(self):
+        result = await call_native_tool("summarize_paper", {"arxiv_id": "2601.10825"}, llm=None)
+        assert "Error" in result
+        assert "LLM" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_style(self):
+        mock_llm = MagicMock()
+        result = await call_native_tool(
+            "summarize_paper",
+            {"arxiv_id": "2601.10825", "style": "invalid"},
+            llm=mock_llm,
+        )
+        assert "Error" in result
+        assert "style" in result
+
+    @pytest.mark.asyncio
+    async def test_successful_summarization(self):
+        """Test the full extract-then-summarize pipeline with mocks."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            LLMResponse(content="**Method name:** TestNet\n**Key claims:** 95.2% accuracy on TestBench"),
+            LLMResponse(content="TestNet achieves 95.2% accuracy on TestBench."),
+        ])
+
+        mock_paper = self._mock_arxiv_paper()
+
+        # Patch the arxiv module that gets imported inside _tool_summarize_paper
+        mock_arxiv = MagicMock()
+        mock_client = MagicMock()
+        mock_client.results.return_value = iter([mock_paper])
+        mock_arxiv.Client.return_value = mock_client
+        mock_arxiv.Search.return_value = MagicMock()
+
+        with unittest.mock.patch.dict("sys.modules", {"arxiv": mock_arxiv}):
+            result = await call_native_tool(
+                "summarize_paper",
+                {"arxiv_id": "2601.10825"},
+                llm=mock_llm,
+            )
+
+        # Verify output structure
+        assert "TestNet" in result
+        assert "Summary" in result
+        assert "Extracted Facts" in result
+        assert "Raw Abstract" in result
+
+        # Verify LLM was called twice (extract + summarize)
+        assert mock_llm.chat.call_count == 2
+
+        # Verify extraction was called with low temperature
+        extract_call = mock_llm.chat.call_args_list[0]
+        assert extract_call[1].get("temperature") == 0.2
+
+        # Verify summarization was called with slightly higher temperature
+        summarize_call = mock_llm.chat.call_args_list[1]
+        assert summarize_call[1].get("temperature") == 0.4
+
+    @pytest.mark.asyncio
+    async def test_summarize_paper_is_native(self):
+        assert is_native_tool("summarize_paper")
+
+    def test_summarize_paper_in_delegate_allowed(self):
+        assert "summarize_paper" in _DELEGATE_ALLOWED_TOOLS

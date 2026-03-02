@@ -261,6 +261,32 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "summarize_paper",
+            "description": (
+                "Summarize an arXiv paper using a two-step extract-then-summarize pipeline. "
+                "Fetches the paper, extracts verbatim facts from the abstract, then generates "
+                "a summary constrained to only those facts. Prevents hallucination."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string",
+                        "description": "The arXiv paper ID (e.g., '2601.10825').",
+                    },
+                    "style": {
+                        "type": "string",
+                        "enum": ["technical", "linkedin"],
+                        "description": "Summary style: 'technical' (default) or 'linkedin'.",
+                    },
+                },
+                "required": ["arxiv_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate",
             "description": (
                 "Delegate a self-contained subtask to a sub-agent with its own tool loop. "
@@ -600,9 +626,130 @@ async def _tool_use_tool(args: dict, **kwargs) -> str:
     return await _mcp_manager.call_tool(name, arguments)
 
 
+# --- Summarize paper (extract-then-summarize) ---
+
+_EXTRACT_PROMPT = """\
+You are a precise fact extractor. Given the abstract of a research paper, extract ONLY facts that are \
+explicitly stated. Do NOT infer, interpret, or add anything.
+
+Extract these categories:
+1. **Method/Model name** — exact name as written
+2. **Authors** — if mentioned in the abstract (often not)
+3. **Key claims** — quote exact numbers, percentages, and comparisons verbatim
+4. **Benchmarks/Datasets** — exact names as written
+5. **Domains** — what field or application area
+
+For each fact, quote the relevant text from the abstract.
+If a category has no information in the abstract, write "NOT MENTIONED".
+
+Paper title: {title}
+Authors: {authors}
+Abstract:
+{abstract}"""
+
+_SUMMARIZE_PROMPT = """\
+You are a precise summarizer. Write a {style} summary of this paper using ONLY the extracted facts below. \
+Do NOT add any information, benchmarks, numbers, or claims that are not in the extracts. \
+If something is marked "NOT MENTIONED", do not guess or fill it in.
+
+{style_instruction}
+
+Paper title: {title}
+
+Extracted facts:
+{extracts}"""
+
+_STYLE_INSTRUCTIONS = {
+    "technical": "Write a concise technical summary (3-5 sentences). Focus on the method, key results, and significance.",
+    "linkedin": "Write an engaging LinkedIn-style post (3-4 short paragraphs). Use accessible language but stay accurate to the extracts.",
+}
+
+
+async def _tool_summarize_paper(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
+    arxiv_id = args.get("arxiv_id", "")
+    style = args.get("style", "technical")
+    if not arxiv_id:
+        return "Error: 'arxiv_id' is required"
+    if llm is None:
+        return "Error: LLM client not available for summarization"
+    if style not in _STYLE_INSTRUCTIONS:
+        return f"Error: style must be 'technical' or 'linkedin', got '{style}'"
+
+    # Step 1: Fetch paper metadata via MCP paper_db or direct arXiv call
+    paper_meta = None
+    if _mcp_manager is not None:
+        try:
+            index_result = await _mcp_manager.call_tool(
+                "paper_db__index_paper", {"arxiv_id": arxiv_id}
+            )
+            log_event(logger, "summarize_paper_indexed", arxiv_id=arxiv_id)
+        except Exception as e:
+            log_event(logger, "summarize_paper_index_failed", arxiv_id=arxiv_id, error=str(e))
+
+    # Fetch metadata directly via arXiv API (always, to get the abstract)
+    try:
+        import arxiv as arxiv_lib
+        client = arxiv_lib.Client()
+        paper = next(client.results(arxiv_lib.Search(id_list=[arxiv_id])))
+        paper_meta = {
+            "title": paper.title,
+            "authors": ", ".join(a.name for a in paper.authors),
+            "abstract": paper.summary,
+        }
+    except Exception as e:
+        return f"Error fetching paper from arXiv: {e}"
+
+    # Step 2: Extract facts at low temperature
+    extract_messages = [
+        {"role": "system", "content": "You are a precise fact extractor. Follow instructions exactly."},
+        {"role": "user", "content": _EXTRACT_PROMPT.format(
+            title=paper_meta["title"],
+            authors=paper_meta["authors"],
+            abstract=paper_meta["abstract"],
+        )},
+    ]
+
+    try:
+        extract_response = await llm.chat(extract_messages, temperature=0.2)
+        extracts = extract_response.content or "(extraction failed)"
+    except Exception as e:
+        return f"Error during fact extraction: {e}"
+
+    # Step 3: Summarize from extracts at slightly higher (but still low) temperature
+    summarize_messages = [
+        {"role": "system", "content": "You are a precise summarizer. Use ONLY the provided extracts."},
+        {"role": "user", "content": _SUMMARIZE_PROMPT.format(
+            style=style,
+            style_instruction=_STYLE_INSTRUCTIONS[style],
+            title=paper_meta["title"],
+            extracts=extracts,
+        )},
+    ]
+
+    try:
+        summary_response = await llm.chat(summarize_messages, temperature=0.4)
+        summary = summary_response.content or "(summarization failed)"
+    except Exception as e:
+        return f"Error during summarization: {e}"
+
+    # Step 4: Return combined output
+    output = (
+        f"# {paper_meta['title']}\n"
+        f"**Authors:** {paper_meta['authors']}\n\n"
+        f"## Summary ({style})\n\n{summary}\n\n"
+        f"---\n\n"
+        f"## Extracted Facts\n\n{extracts}\n\n"
+        f"---\n\n"
+        f"## Raw Abstract\n\n{paper_meta['abstract']}"
+    )
+
+    log_event(logger, "summarize_paper_complete", arxiv_id=arxiv_id, style=style)
+    return output
+
+
 # --- Delegate sub-agent ---
 
-_DELEGATE_ALLOWED_TOOLS = {"bash", "read_file", "write_file", "list_directory", "web_search", "web_fetch"}
+_DELEGATE_ALLOWED_TOOLS = {"bash", "read_file", "write_file", "list_directory", "web_search", "web_fetch", "summarize_paper"}
 _DELEGATE_MAX_ROUNDS = 5
 
 _DELEGATE_SYSTEM_PROMPT = """\
@@ -700,5 +847,6 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "web_search": _tool_web_search,
     "list_available_tools": _tool_list_available_tools,
     "use_tool": _tool_use_tool,
+    "summarize_paper": _tool_summarize_paper,
     "delegate": _tool_delegate,
 }

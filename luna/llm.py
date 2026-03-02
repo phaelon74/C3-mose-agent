@@ -46,13 +46,14 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
     ) -> LLMResponse:
         """Send a chat completion request. Returns structured response."""
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
+            "temperature": temperature if temperature is not None else self.config.temperature,
         }
         if tools:
             kwargs["tools"] = tools
