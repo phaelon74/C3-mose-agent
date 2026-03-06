@@ -137,7 +137,7 @@ class Agent:
         self.llm = llm
         self.memory = memory
         self.mcp = mcp
-        self.max_tool_rounds = 10  # safety limit on tool call loops
+        self.max_tool_rounds = 25  # safety limit on tool call loops
 
     async def process(self, message: str, session_id: str) -> str:
         """Process a user message and return the assistant's response."""

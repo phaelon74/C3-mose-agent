@@ -1,7 +1,7 @@
 [llm]
 endpoint = "http://localhost:8001/v1"
 model = "worker-agent"
-max_tokens = 8192
+max_tokens = 16384
 temperature = 0.7
 
 [discord]

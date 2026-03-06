@@ -18,7 +18,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 class LLMConfig:
     endpoint: str = "http://localhost:8001/v1"
     model: str = "worker-agent"
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     temperature: float = 1.0
 
 
