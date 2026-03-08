@@ -2,11 +2,13 @@
 Description=Luna Agent - Custom AI Assistant
 After=network-online.target worker-agent.service
 Wants=network-online.target
+Requires=worker-agent.service
 
 [Service]
 Type=simple
 User=fabio
 WorkingDirectory=/home/fabio/luna-agent
+EnvironmentFile=-/home/fabio/luna-agent/.env
 ExecStart=/home/fabio/luna-agent/.venv/bin/python -m luna
 Restart=always
 RestartSec=10
