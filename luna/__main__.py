@@ -12,7 +12,7 @@ from pathlib import Path
 
 from luna.config import load_config
 from luna.observe import setup_logging, get_logger, log_event
-from luna.llm import LLMClient
+from luna.llm import create_llm_client
 from luna.memory import MemoryManager
 from luna.mcp_manager import MCPManager
 from luna.agent import Agent
@@ -106,7 +106,7 @@ async def main() -> None:
     init_workspace(config.agent.workspace, config.agent.allow_read_outside)
 
     # Initialize components
-    llm = LLMClient(config.llm)
+    llm = create_llm_client(config.llm)
     memory = MemoryManager(config.memory)
 
     mcp = MCPManager()

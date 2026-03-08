@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -147,3 +149,194 @@ class LLMClient:
         )
 
         return response
+
+
+# ---------------------------------------------------------------------------
+# AWS Bedrock backend (hidden easter egg)
+# ---------------------------------------------------------------------------
+
+
+def _is_bedrock_endpoint(endpoint: str) -> bool:
+    """Return True if the endpoint string activates the Bedrock backend."""
+    return endpoint.lower().startswith("bedrock")
+
+
+def _parse_bedrock_region(endpoint: str) -> str | None:
+    """Extract AWS region from 'bedrock://us-east-1', or None for bare 'bedrock'."""
+    if "://" in endpoint:
+        region = endpoint.split("://", 1)[1].strip().rstrip("/")
+        return region or None
+    return None
+
+
+def _openai_messages_to_bedrock(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Convert OpenAI-format messages to Bedrock Converse format.
+
+    Returns (system_prompts, bedrock_messages).
+    """
+    system_prompts: list[dict[str, Any]] = []
+    bedrock_messages: list[dict[str, Any]] = []
+
+    for msg in messages:
+        role = msg["role"]
+
+        if role == "system":
+            system_prompts.append({"text": msg["content"]})
+            continue
+
+        if role == "assistant":
+            content_blocks: list[dict[str, Any]] = []
+            if msg.get("content"):
+                content_blocks.append({"text": msg["content"]})
+            for tc in msg.get("tool_calls", []):
+                fn = tc["function"]
+                content_blocks.append({
+                    "toolUse": {
+                        "toolUseId": tc["id"],
+                        "name": fn["name"],
+                        "input": json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else fn["arguments"],
+                    }
+                })
+            if content_blocks:
+                bedrock_messages.append({"role": "assistant", "content": content_blocks})
+            continue
+
+        if role == "tool":
+            tool_result_block = {
+                "toolResult": {
+                    "toolUseId": msg["tool_call_id"],
+                    "content": [{"text": msg["content"]}],
+                }
+            }
+            # Batch consecutive tool results into a single user message
+            if bedrock_messages and bedrock_messages[-1]["role"] == "user" and any(
+                "toolResult" in b for b in bedrock_messages[-1]["content"]
+            ):
+                bedrock_messages[-1]["content"].append(tool_result_block)
+            else:
+                bedrock_messages.append({"role": "user", "content": [tool_result_block]})
+            continue
+
+        # user messages
+        bedrock_messages.append({"role": "user", "content": [{"text": msg["content"]}]})
+
+    return system_prompts, bedrock_messages
+
+
+def _openai_tools_to_bedrock(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI function-calling tool definitions to Bedrock toolSpec format."""
+    bedrock_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        fn = tool["function"]
+        spec: dict[str, Any] = {
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "inputSchema": {"json": fn.get("parameters", {})},
+        }
+        bedrock_tools.append({"toolSpec": spec})
+    return bedrock_tools
+
+
+def _bedrock_response_to_llm_response(response: dict[str, Any]) -> LLMResponse:
+    """Convert a Bedrock Converse API response to an LLMResponse."""
+    output = response.get("output", {})
+    message = output.get("message", {})
+    content_blocks = message.get("content", [])
+
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+
+    for block in content_blocks:
+        if "text" in block:
+            text_parts.append(block["text"])
+        elif "toolUse" in block:
+            tu = block["toolUse"]
+            tool_calls.append(ToolCall(
+                id=tu["toolUseId"],
+                name=tu["name"],
+                arguments=json.dumps(tu["input"]),
+            ))
+
+    usage = response.get("usage", {})
+
+    return LLMResponse(
+        content="\n".join(text_parts) if text_parts else None,
+        tool_calls=tool_calls,
+        prompt_tokens=usage.get("inputTokens", 0),
+        completion_tokens=usage.get("outputTokens", 0),
+        raw=response,
+    )
+
+
+class BedrockClient:
+    """LLM client using AWS Bedrock Converse API."""
+
+    def __init__(self, config: LLMConfig) -> None:
+        self.config = config
+        try:
+            import boto3
+        except ImportError:
+            raise ImportError(
+                "boto3 is required for the Bedrock backend. "
+                "Install it with: pip install luna-agent[cloud]"
+            )
+        region = _parse_bedrock_region(config.endpoint)
+        kwargs: dict[str, Any] = {}
+        if region:
+            kwargs["region_name"] = region
+        self._bedrock = boto3.client("bedrock-runtime", **kwargs)
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        """Send a chat request via Bedrock Converse API."""
+        system_prompts, bedrock_messages = _openai_messages_to_bedrock(messages)
+
+        kwargs: dict[str, Any] = {
+            "modelId": self.config.model,
+            "messages": bedrock_messages,
+        }
+        if system_prompts:
+            kwargs["system"] = system_prompts
+        if tools:
+            kwargs["toolConfig"] = {"tools": _openai_tools_to_bedrock(tools)}
+
+        temp = temperature if temperature is not None else self.config.temperature
+        kwargs["inferenceConfig"] = {
+            "maxTokens": self.config.max_tokens,
+            "temperature": temp,
+        }
+
+        tool_names = [t["function"]["name"] for t in (tools or [])]
+
+        with log_duration(logger, "llm_call", model=self.config.model, tools_available=len(tool_names)):
+            try:
+                raw = await asyncio.to_thread(self._bedrock.converse, **kwargs)
+            except Exception:
+                logger.exception("Bedrock call failed")
+                raise
+
+        response = _bedrock_response_to_llm_response(raw)
+
+        log_event(
+            logger,
+            "llm_response",
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+            has_tool_calls=response.has_tool_calls(),
+            tools_called=[tc.name for tc in response.tool_calls],
+        )
+
+        return response
+
+
+def create_llm_client(config: LLMConfig) -> LLMClient | BedrockClient:
+    """Factory: return the right LLM client based on the endpoint string."""
+    if _is_bedrock_endpoint(config.endpoint):
+        return BedrockClient(config)
+    return LLMClient(config)
