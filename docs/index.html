@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Luna Agent</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;line-height:1.6}
+a{color:#58a6ff;text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:800px;margin:0 auto;padding:2rem 1.5rem}
+header{text-align:center;padding:4rem 0 2rem}
+h1{font-size:2.5rem;color:#f0f6fc;margin-bottom:0.5rem}
+h1 span{color:#8b949e}
+.tagline{font-size:1.2rem;color:#8b949e;margin-bottom:2rem}
+.badges{display:flex;gap:0.5rem;justify-content:center;margin-bottom:3rem;flex-wrap:wrap}
+.badges img{height:20px}
+h2{color:#f0f6fc;font-size:1.3rem;margin:2rem 0 1rem;padding-bottom:0.3rem;border-bottom:1px solid #21262d}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.5rem;margin:2rem 0}
+.feature{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:1.2rem}
+.feature h3{color:#f0f6fc;font-size:1rem;margin-bottom:0.5rem}
+.feature p{color:#8b949e;font-size:0.9rem}
+.arch{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:1.5rem;overflow-x:auto;margin:1.5rem 0}
+.arch pre{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;font-size:0.85rem;color:#c9d1d9;line-height:1.5}
+.quickstart{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:1.5rem;margin:1.5rem 0}
+.quickstart code{display:block;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;font-size:0.85rem;color:#c9d1d9;line-height:1.8}
+.quickstart .comment{color:#8b949e}
+.cta{text-align:center;margin:3rem 0}
+.btn{display:inline-block;background:#238636;color:#fff;padding:0.7rem 1.5rem;border-radius:6px;font-size:1rem;font-weight:600}
+.btn:hover{background:#2ea043;text-decoration:none}
+footer{text-align:center;padding:2rem 0;color:#484f58;font-size:0.85rem;border-top:1px solid #21262d;margin-top:3rem}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<h1><span>&#127769;</span> Luna Agent</h1>
+<p class="tagline">Custom minimal AI agent with persistent memory, MCP tools, and Discord</p>
+<div class="badges">
+<img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+">
+<img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
+<img src="https://img.shields.io/badge/lines-~2300-informational.svg" alt="~2300 lines">
+<img src="https://img.shields.io/badge/frameworks-zero-green.svg" alt="No frameworks">
+</div>
+</header>
+
+<div class="features">
+<div class="feature">
+<h3>Persistent Memory</h3>
+<p>SQLite + FTS5 + sqlite-vec hybrid search. Keyword, semantic, and recency-weighted retrieval with automatic conversation summarization.</p>
+</div>
+<div class="feature">
+<h3>MCP Tools</h3>
+<p>Connect any MCP-compatible tool server via JSON config. Built-in tools for bash, files, web fetch, and web search.</p>
+</div>
+<div class="feature">
+<h3>Discord Interface</h3>
+<p>DMs, mentions, and threaded conversations with session isolation. Typing indicators and smart message splitting.</p>
+</div>
+<div class="feature">
+<h3>Local-First</h3>
+<p>Runs on your hardware with any OpenAI-compatible endpoint. No cloud API costs. Tested with llama-server + Qwen3-Coder-Next.</p>
+</div>
+<div class="feature">
+<h3>Structured Observability</h3>
+<p>Every LLM call, tool execution, and memory operation logged as structured JSON. One JSONL file per day.</p>
+</div>
+<div class="feature">
+<h3>No Frameworks</h3>
+<p>~2300 lines of Python. 8 runtime dependencies. Every line is auditable. No 400K-line agent framework needed.</p>
+</div>
+</div>
+
+<h2>Architecture</h2>
+<div class="arch"><pre>
+Discord (discord.py)
+     |
+     v
++-----------------------+
+|    Luna Agent Core    |
+|                       |
+|  agent.py             |  agent loop: msg -> memory -> prompt -> LLM -> tools -> respond
+|    +-- llm.py         |  single LLM client, configurable endpoint
+|    +-- memory.py      |  SQLite + FTS5 + sqlite-vec hybrid search
+|    +-- tools.py       |  native tools: bash, files, web fetch, web search
+|    +-- tool_output.py |  smart output pipeline for large results
+|    +-- mcp_manager.py |  MCP client for community tool servers
+|    +-- observe.py     |  structured JSON logging
+|                       |
++-----------------------+
+         |
+         v
+   llama-server          any OpenAI-compatible endpoint
+</pre></div>
+
+<h2>Quick Start</h2>
+<div class="quickstart"><code>
+<span class="comment"># Clone and install</span>
+git clone https://github.com/nonatofabio/luna-agent.git
+cd luna-agent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+<span class="comment"># Configure MCP servers (optional)</span>
+cp mcp_servers.example.json mcp_servers.json
+
+<span class="comment"># Run tests</span>
+pytest tests/ -v
+
+<span class="comment"># Run the agent</span>
+python -m luna
+</code></div>
+
+<div class="cta">
+<a href="https://github.com/nonatofabio/luna-agent" class="btn">View on GitHub</a>
+</div>
+
+<footer>
+MIT License &mdash; Fabio Nonato, 2026
+</footer>
+</div>
+</body>
+</html>

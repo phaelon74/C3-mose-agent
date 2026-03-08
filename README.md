@@ -1,8 +1,23 @@
-# Luna Agent
+<p align="center">
+  <img src="assets/logo.svg" alt="Luna Agent" width="120" height="120">
+</p>
 
-A custom minimal AI agent with persistent memory, MCP tool integration, Discord interface, and structured observability. Runs entirely on local hardware — no cloud API costs.
+<h1 align="center">Luna Agent</h1>
 
-~1400 lines of Python. No frameworks.
+<p align="center">
+  A custom minimal AI agent with persistent memory, MCP tool integration, Discord interface, and structured observability.<br>
+  Runs entirely on local hardware — no cloud API costs.
+</p>
+
+<p align="center">
+  <a href="https://github.com/nonatofabio/luna-agent/actions/workflows/tests.yml"><img src="https://github.com/nonatofabio/luna-agent/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
+</p>
+
+---
+
+~2300 lines of Python. No frameworks.
 
 ## Why Custom
 
@@ -34,16 +49,19 @@ Discord (discord.py)
 +-----------------------+
          |
          v
-   llama-server          Qwen3-Coder-Next on 2x RTX 3090
+   llama-server          Qwen3.5-35B-A3B on 2x RTX 3090
 ```
 
 All LLM traffic flows through a single `LLMClient` with a configurable endpoint URL. Today it points at `localhost:8001` (llama-server). To insert an AI firewall later, change the URL to `localhost:9000` — zero code changes required.
+
+**Thinking model support:** Luna handles reasoning models (Qwen3.5, etc.) automatically — extracting `reasoning_content`, falling back to cleaned reasoning when content is empty, and stripping leaked markup (`<thinking>`, `<tool_call>`, etc.) from output.
 
 ## Hardware
 
 - Intel i7-13700K, 64GB DDR4
 - 2x NVIDIA RTX 3090 (24GB each, 48GB total)
-- Qwen3-Coder-Next UD-Q4_K_XL (44.6GB) via llama-server with layer split across both GPUs
+- Qwen3.5-35B-A3B Q8_0 via llama-server with layer split across both GPUs
+- 131K context window, Q8_0 KV cache
 
 ## Quick Start
 
@@ -53,14 +71,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
+# Run tests
+pytest tests/ -v
+
 # Run without Discord (headless mode)
 python -m luna
 
 # Run with Discord
 DISCORD_TOKEN=your-token-here python -m luna
-
-# Run tests
-pytest tests/ -v
 ```
 
 ## Project Structure
@@ -122,7 +140,7 @@ The orchestrator. Receives a message and session ID, then:
 4. Builds a system prompt with memories, summary, and current time
 5. Loads the last 20 messages for context
 6. Calls the LLM with all available tools (native + MCP)
-7. Enters a tool call loop (max 10 rounds):
+7. Enters a tool call loop (max 25 rounds):
    - Executes each tool call (native or MCP)
    - Feeds results back to the LLM
    - Repeats until the LLM responds without tool calls
@@ -131,9 +149,9 @@ The orchestrator. Receives a message and session ID, then:
 
 ### LLM Client (`llm.py`)
 
-Thin async wrapper around the OpenAI-compatible API. Single `chat()` method that handles tool calls. This is the only code that talks to the LLM — the AI firewall insertion point.
+Thin async wrapper around the OpenAI-compatible API. Single `chat()` method that handles tool calls, thinking model output, and per-call temperature overrides. This is the only code that talks to the LLM — the AI firewall insertion point.
 
-Returns structured `LLMResponse` objects with content, tool calls, and token usage.
+Returns structured `LLMResponse` objects with content, reasoning, tool calls, and token usage.
 
 ### Memory (`memory.py`)
 
@@ -270,7 +288,6 @@ Copy the systemd service files and enable them:
 sudo cp luna-agent.service /etc/systemd/system/
 sudo cp worker-agent.service /etc/systemd/system/
 
-# Edit luna-agent.service to set DISCORD_TOKEN
 sudo systemctl daemon-reload
 sudo systemctl enable --now worker-agent    # Start LLM server first
 sudo systemctl enable --now luna-agent      # Then the agent
@@ -282,13 +299,6 @@ sudo systemctl enable --now luna-agent      # Then the agent
 journalctl -u luna-agent -f
 journalctl -u worker-agent -f
 ```
-
-The `worker-agent.service` runs llama-server with:
-- Both GPUs (`CUDA_VISIBLE_DEVICES=0,1`)
-- 128K context window
-- Q8_0 KV cache for memory efficiency
-- Flash attention enabled
-- Jinja template support for chat formatting
 
 ## Dependencies
 
@@ -316,3 +326,11 @@ The `worker-agent.service` runs llama-server with:
 - No multi-user auth (single user)
 - No cloud LLM fallback (local only)
 - No containers for the agent (systemd is simpler)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull request guidelines.
+
+## License
+
+[MIT](LICENSE) — Fabio Nonato, 2026

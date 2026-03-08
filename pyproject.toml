@@ -2,6 +2,20 @@
 name = "luna-agent"
 version = "0.1.0"
 description = "Luna - Custom minimal AI agent with memory, MCP tools, and Discord"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Fabio Nonato", email = "nonatofabio@users.noreply.github.com" },
+]
+keywords = ["ai", "agent", "llm", "mcp", "discord", "memory", "local"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.4",
@@ -27,6 +41,11 @@ include = ["luna*"]
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[project.urls]
+Homepage = "https://nonatofabio.github.io/luna-agent"
+Repository = "https://github.com/nonatofabio/luna-agent"
+Issues = "https://github.com/nonatofabio/luna-agent/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
