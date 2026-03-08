@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Luna Agent — a minimal AI assistant with persistent memory, MCP tool use, and Discord as its interface. It runs on Fabio's homelab (dual RTX 3090s) using a local Qwen3-Coder-Next model via llama-server as the LLM backend.
+Luna Agent — a minimal AI assistant with persistent memory, MCP tool use, and Discord/CLI interface. It runs on Fabio's homelab (dual RTX 3090s) using a local Qwen3.5-35B-A3B model via llama-server as the LLM backend.
 
 ## Commands
 
@@ -15,7 +15,7 @@ source .venv/bin/activate
 # Install dependencies
 pip install -e ".[dev]"
 
-# Run the agent (needs DISCORD_TOKEN env var for Discord, otherwise headless mode)
+# Run the agent (needs DISCORD_TOKEN env var for Discord, otherwise interactive CLI)
 python -m luna
 
 # Run all tests
@@ -26,16 +26,16 @@ pytest tests/test_memory.py
 pytest tests/test_agent.py::TestAgent::test_basic_response
 
 # Systemd services (the agent depends on the LLM server)
-sudo systemctl start qwen3-server    # starts llama-server on port 8001
-sudo systemctl start luna-agent      # starts the bot (requires qwen3-server)
+sudo systemctl start worker-agent    # starts llama-server on port 8001 (Qwen3.5-35B-A3B)
+sudo systemctl start luna-agent      # starts the bot (requires worker-agent)
 journalctl -u luna-agent -f          # live logs
 ```
 
 ## Architecture
 
-The agent follows a straightforward pipeline: **Discord message → Agent loop → LLM (with tool calls) → Response**.
+The agent follows a straightforward pipeline: **Discord message (or CLI input) → Agent loop → LLM (with tool calls) → Response**.
 
-**`agent.py`** — The orchestrator. `Agent.process()` is the main entry point: it saves the user message to memory, retrieves relevant memories via hybrid search, builds a system prompt with memory context, calls the LLM, executes any tool calls in a loop (max 10 rounds), saves the response, and periodically triggers summarization/fact extraction.
+**`agent.py`** — The orchestrator. `Agent.process()` is the main entry point: it saves the user message to memory, retrieves relevant memories via hybrid search, builds a system prompt with memory context, calls the LLM, executes any tool calls in a loop (max 25 rounds), saves the response, and periodically triggers summarization/fact extraction. Accepts an optional `tool_callback` for real-time tool call observation (used by CLI REPL).
 
 **`memory.py`** — Persistent memory using SQLite with three search mechanisms:
 - **FTS5** for keyword search
@@ -48,7 +48,11 @@ Three tables: `memories` (long-term facts), `messages` (conversation history per
 
 **`llm.py`** — Thin async wrapper around the OpenAI client, pointing at the local llama-server (`localhost:8001`). Returns `LLMResponse` dataclass with parsed tool calls.
 
+**`tools.py`** — Native tools (bash, file I/O, web search/fetch, delegate, code_task, summarize_paper, MCP meta-tools) plus `verify_tool_result()` which annotates tool output with error hints. Sub-agent tools (`delegate`, `code_task`) get restricted tool subsets to prevent recursion.
+
 **`discord_bot.py`** — Discord.py client. Responds to DMs, @mentions, and thread replies. Session IDs are derived from channel/thread/DM context. Long messages are split at newline/space boundaries to fit Discord's 2000-char limit.
+
+**`__main__.py`** — Entry point. With `DISCORD_TOKEN`: starts Discord bot. Without: starts an interactive CLI REPL where tool calls print inline as they execute. Console log handlers are suppressed to WARNING in CLI mode.
 
 **`observe.py`** — Structured JSON logging (`data/logs/luna-YYYY-MM-DD.jsonl`). All components use `log_event()` for structured data and `log_duration()` context manager for latency tracking.
 

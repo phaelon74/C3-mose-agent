@@ -5,7 +5,7 @@
 <h1 align="center">Luna Agent</h1>
 
 <p align="center">
-  A custom minimal AI agent with persistent memory, MCP tool integration, Discord interface, and structured observability.<br>
+  A custom minimal AI agent with persistent memory, MCP tool integration, Discord/CLI interface, and structured observability.<br>
   Runs entirely on local hardware — no cloud API costs.
 </p>
 
@@ -32,24 +32,24 @@ The core needs (memory, tools, chat, logging) are individually well-solved probl
 ## Architecture
 
 ```
-Discord (discord.py)
-     |
-     v
-+-----------------------+
-|    Luna Agent Core    |
-|                       |
-|  agent.py             |  agent loop: msg → memory → prompt → LLM → tools → respond
-|    ├── llm.py         |  single LLM client, configurable endpoint
-|    ├── memory.py      |  SQLite + FTS5 + sqlite-vec hybrid search
-|    ├── tools.py       |  native tools: bash, files, web fetch, web search
-|    ├── tool_output.py |  smart output pipeline for large results
-|    ├── mcp_manager.py |  MCP client for community tool servers
-|    └── observe.py     |  structured JSON logging
-|                       |
-+-----------------------+
-         |
-         v
-   llama-server          Qwen3.5-35B-A3B on 2x RTX 3090
+Discord (discord.py)     CLI REPL (no token)
+     |                        |
+     v                        v
++---------------------------------+
+|        Luna Agent Core          |
+|                                 |
+|  agent.py                       |  agent loop: msg → memory → prompt → LLM → tools → respond
+|    ├── llm.py                   |  single LLM client, configurable endpoint
+|    ├── memory.py                |  SQLite + FTS5 + sqlite-vec hybrid search
+|    ├── tools.py                 |  native tools: bash, files, web, delegate, code_task
+|    ├── tool_output.py           |  smart output pipeline for large results
+|    ├── mcp_manager.py           |  MCP client for community tool servers
+|    └── observe.py               |  structured JSON logging
+|                                 |
++---------------------------------+
+              |
+              v
+        llama-server               Qwen3.5-35B-A3B on 2x RTX 3090
 ```
 
 All LLM traffic flows through a single `LLMClient` with a configurable endpoint URL. Today it points at `localhost:8001` (llama-server). To insert an AI firewall later, change the URL to `localhost:9000` — zero code changes required.
@@ -74,7 +74,7 @@ pip install -e ".[dev]"
 # Run tests
 pytest tests/ -v
 
-# Run without Discord (headless mode)
+# Run without Discord (interactive CLI REPL)
 python -m luna
 
 # Run with Discord
@@ -106,7 +106,7 @@ luna-agent/
 │   ├── test_tools.py        # Native tool tests
 │   └── test_tool_output.py  # Output pipeline tests
 ├── luna-agent.service        # systemd unit for the agent
-├── worker-agent.service      # systemd unit for llama-server
+├── worker-agent.service      # systemd unit for llama-server (Qwen3.5-35B-A3B)
 └── data/                     # Created at runtime
     ├── memory.db             # SQLite database
     ├── logs/                 # JSON log files
@@ -182,7 +182,7 @@ All retrieval parameters (top_k, RRF k, recency weight, importance threshold, et
 
 ### Native Tools (`tools.py`)
 
-Six built-in tools that don't require external MCP servers:
+Built-in tools that don't require external MCP servers:
 
 | Tool | Description |
 |------|-------------|
@@ -192,6 +192,11 @@ Six built-in tools that don't require external MCP servers:
 | `list_directory` | List files/directories, optional recursion with depth limits |
 | `web_fetch` | Fetch a URL and convert HTML to markdown via html2text |
 | `web_search` | Search the web via DuckDuckGo, returns structured results |
+| `delegate` | Hand off a self-contained subtask to a sub-agent with its own tool loop |
+| `code_task` | Delegate a coding task to a sub-agent with a write-run-fix loop |
+| `summarize_paper` | Fetch and summarize an arXiv paper |
+| `list_available_tools` | Discover MCP tools available from connected servers |
+| `use_tool` | Call a specific MCP tool by name |
 
 **Bash safety:** Commands are checked against blocked patterns before execution:
 - `rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, fork bombs, writes to `/dev/sda`
@@ -289,8 +294,8 @@ sudo cp luna-agent.service /etc/systemd/system/
 sudo cp worker-agent.service /etc/systemd/system/
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now worker-agent    # Start LLM server first
-sudo systemctl enable --now luna-agent      # Then the agent
+sudo systemctl enable --now worker-agent    # Start LLM server (Qwen3.5-35B-A3B) first
+sudo systemctl enable --now luna-agent      # Then the agent (depends on worker-agent)
 ```
 
 **Monitor:**
@@ -299,6 +304,8 @@ sudo systemctl enable --now luna-agent      # Then the agent
 journalctl -u luna-agent -f
 journalctl -u worker-agent -f
 ```
+
+**CLI mode** (no Discord token): The agent starts an interactive REPL where tool calls print inline as they execute, then the final response prints below. Useful for testing without Discord.
 
 ## Dependencies
 

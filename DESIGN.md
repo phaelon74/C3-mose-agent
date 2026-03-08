@@ -26,15 +26,15 @@ The core needs (LLM chat, memory, tool calling, Discord, logging) are individual
 
 ## Local LLM Over Cloud API
 
-**Decision:** Qwen3-Coder-Next on local hardware via llama-server. No cloud fallback.
+**Decision:** Local LLM on local hardware via llama-server. No cloud fallback.
 
 **Why:**
 - Zero ongoing API cost (already own the hardware)
 - No data leaves the machine
 - Full control over model, quantization, and context length
-- 2x RTX 3090 (48GB total) fits Q4_K_XL quantization (44.6GB) with room for KV cache
+- 2x RTX 3090 (48GB total) fits large quantizations with room for KV cache
 
-**Model choice:** Qwen3-Coder-Next was selected for strong tool-calling support and coding ability. The UD-Q4_K_XL quantization preserves quality while fitting in VRAM. Layer split (not tensor parallel) is used because the GPUs connect via PHB, not NVLink.
+**Current model:** Qwen3.5-35B-A3B Q8_0 — a 35B MoE model (3B active parameters) with strong tool-calling and reasoning capabilities. Q8_0 quantization preserves near-full quality. Layer split (not tensor parallel) is used because the GPUs connect via PHB, not NVLink. 131K context window with Q8_0 KV cache.
 
 ## Single LLM Endpoint (AI Firewall Ready)
 
