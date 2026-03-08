@@ -20,6 +20,44 @@ BASH_DEFAULT_TIMEOUT = 30
 BASH_MAX_TIMEOUT = 120
 LIST_DIR_MAX_ENTRIES = 500
 
+# Patterns that indicate tool execution problems
+_ERROR_PATTERNS: list[tuple[str, str]] = [
+    ("connection refused", "The target service may be down."),
+    ("permission denied", "Permission issue — may need sudo or different path."),
+    ("no such file or directory", "File/path does not exist."),
+    ("command not found", "Command is not installed or not in PATH."),
+    ("timed out", "Operation timed out — consider a longer timeout or simpler approach."),
+    ("name or service not known", "DNS resolution failed — check the hostname."),
+    ("disk quota exceeded", "Out of disk space."),
+    ("connection timed out", "Network timeout — host may be unreachable."),
+]
+
+
+def verify_tool_result(tool_name: str, result: str) -> str:
+    """Check a tool result for common problems and annotate if issues found.
+
+    Returns the result string, possibly with a [NOTE] appended.
+    Pure string matching — no LLM calls.
+    """
+    if not result or result.strip() == "(no output)":
+        return result + "\n[NOTE: Tool returned empty/no output. Verify the command was correct.]"
+
+    result_lower = result.lower()
+
+    # Check for non-zero exit codes in bash output
+    if "(exit code:" in result_lower and "(exit code: 0)" not in result_lower:
+        for pattern, hint in _ERROR_PATTERNS:
+            if pattern in result_lower:
+                return result + f"\n[NOTE: {hint}]"
+        return result + "\n[NOTE: Command exited with non-zero status. Check the output for errors.]"
+
+    # Check for error patterns even without exit codes (web_fetch, MCP tools, etc.)
+    for pattern, hint in _ERROR_PATTERNS:
+        if pattern in result_lower:
+            return result + f"\n[NOTE: {hint}]"
+
+    return result
+
 # Workspace — set by init_workspace() at startup
 _workspace: Path | None = None
 _allow_read_outside: bool = True
@@ -305,6 +343,35 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     "context": {
                         "type": "string",
                         "description": "Optional background context to help the sub-agent.",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "code_task",
+            "description": (
+                "Delegate a coding task to a specialized sub-agent that writes, runs, and iterates "
+                "on code. Use for scripts, scrapers, data processing, automation — anything needing "
+                "code execution with a write-run-fix loop. Prefer this over delegate for coding work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Clear description of the coding task.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Background context or constraints.",
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Subdirectory within workspace (auto-generated if omitted).",
                     },
                 },
                 "required": ["task"],
@@ -836,6 +903,133 @@ async def _tool_delegate(args: dict, context: str = "", llm=None, root=None, **k
     return final
 
 
+# --- Code task sub-agent ---
+
+_CODE_TASK_ALLOWED_TOOLS = {
+    "bash", "read_file", "write_file", "list_directory",
+    "web_search", "web_fetch",
+}
+_CODE_TASK_MAX_ROUNDS = 25
+
+_CODE_TASK_SYSTEM_PROMPT = """\
+You are a coding sub-agent. Your job is to write code that WORKS, not code that looks right.
+
+## Mandatory Workflow
+For every piece of code you write, you MUST follow this cycle:
+1. WRITE the code (write_file)
+2. RUN the code (bash)
+3. CHECK the output — did it succeed? Did it produce the expected result?
+4. If it FAILED: read the error, diagnose, fix, go back to step 2
+5. If it SUCCEEDED: verify the output makes sense (not empty, not error pages, not placeholder data)
+
+NEVER skip steps 2-4. NEVER declare success without running the code.
+
+## Anti-Hallucination Rules
+- Do NOT guess API endpoints, DOM selectors, or URL patterns
+- If you need to access a website or API: web_search for docs first, web_fetch to read them, then code
+- If a library call fails, search for the correct approach — do NOT invent alternatives
+- If you cannot verify something works, say so explicitly
+
+## Error Handling
+- Non-zero exit codes = FAILED. Read stderr, diagnose, fix, re-run.
+- Empty output often = silent failure. Add print statements or assertions.
+- HTTP 403/404/500 = wrong URL/API. Research the correct one.
+- Import errors = missing package. Install it.
+
+## Completion
+Report: (1) what was accomplished, (2) files created/modified, (3) how verified, (4) known issues.
+
+Working directory: {working_dir}
+"""
+
+
+async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
+    task = args.get("task", "")
+    if not task:
+        return "Error: 'task' is required"
+    if llm is None:
+        return "Error: LLM client not available for code task"
+
+    # Create working directory within workspace
+    working_dir_name = args.get("working_dir", "")
+    if not working_dir_name:
+        safe_name = re.sub(r"[^\w\-]", "_", task[:40]).strip("_").lower()
+        working_dir_name = safe_name
+    working_dir = _workspace / working_dir_name if _workspace else Path(working_dir_name)
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    system = _CODE_TASK_SYSTEM_PROMPT.format(working_dir=str(working_dir))
+    if args.get("context"):
+        system += f"\n\nAdditional context: {args['context']}"
+
+    tools = [t for t in NATIVE_TOOLS if t["function"]["name"] in _CODE_TASK_ALLOWED_TOOLS]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": task},
+    ]
+
+    log_event(logger, "code_task_start", task=task[:100])
+
+    response = await llm.chat(messages, tools=tools, temperature=0.4)
+    rounds = 0
+
+    while response.has_tool_calls() and rounds < _CODE_TASK_MAX_ROUNDS:
+        rounds += 1
+
+        # Append assistant message with tool calls
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": response.content or ""}
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": tc.arguments},
+            }
+            for tc in response.tool_calls
+        ]
+        messages.append(assistant_msg)
+
+        # Execute each tool call
+        for tc in response.tool_calls:
+            log_event(logger, "code_task_tool", tool=tc.name)
+            try:
+                if tc.name not in _CODE_TASK_ALLOWED_TOOLS:
+                    result = f"Error: Tool '{tc.name}' is not available in code task context."
+                elif is_native_tool(tc.name):
+                    result = await call_native_tool(
+                        tc.name, tc.arguments,
+                        context=task, llm=llm, root=root,
+                    )
+                else:
+                    result = f"Error: Tool '{tc.name}' is not available in code task context."
+            except Exception as e:
+                result = f"Tool error: {e}"
+
+            result = verify_tool_result(tc.name, result)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+        response = await llm.chat(messages, tools=tools, temperature=0.4)
+
+    if rounds >= _CODE_TASK_MAX_ROUNDS:
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have reached the tool limit. Provide your final report now: "
+                "(1) what was accomplished, (2) files created/modified, "
+                "(3) how it was verified, (4) known issues or incomplete items."
+            ),
+        })
+        response = await llm.chat(messages, temperature=0.4)
+
+    final = response.content or "(code task produced no response)"
+    log_event(logger, "code_task_complete", rounds=rounds, response_len=len(final))
+    return final
+
+
 # --- Registry ---
 
 _TOOL_REGISTRY: dict[str, Any] = {
@@ -849,4 +1043,5 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "use_tool": _tool_use_tool,
     "summarize_paper": _tool_summarize_paper,
     "delegate": _tool_delegate,
+    "code_task": _tool_code_task,
 }

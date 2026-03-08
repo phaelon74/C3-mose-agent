@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from luna.config import Config
 from luna.llm import LLMClient
 from luna.memory import MemoryManager
 from luna.mcp_manager import MCPManager
 from luna.observe import get_logger, log_event, log_duration
-from luna.tools import NATIVE_TOOLS, is_native_tool, call_native_tool
+from luna.tools import NATIVE_TOOLS, is_native_tool, call_native_tool, verify_tool_result
 
 logger = get_logger("agent")
 
@@ -31,6 +31,9 @@ You are expected to use these tools proactively — do not describe what you cou
 - **web_fetch**: Fetch and read a specific URL. Use after web_search to get details from a result.
 - **delegate**: Hand off a self-contained subtask to a sub-agent with its own tool loop. \
 Use for multi-step research, complex file operations, or anything that benefits from focused context.
+- **code_task**: Delegate a coding task to a sub-agent that writes code, runs it, checks results, \
+and iterates on failures. Use for scripts, scrapers, automation, or any task requiring write-run-fix cycles. \
+Prefer this over delegate for coding work.
 - **list_available_tools / use_tool**: Discover and call additional MCP tools beyond the built-ins.
 
 ## Guidelines
@@ -90,54 +93,23 @@ def _build_system_prompt(memories: list, summary: str | None, current_time: str,
     )
 
 
-# Patterns that indicate tool execution problems
-_ERROR_PATTERNS: list[tuple[str, str]] = [
-    ("connection refused", "The target service may be down."),
-    ("permission denied", "Permission issue — may need sudo or different path."),
-    ("no such file or directory", "File/path does not exist."),
-    ("command not found", "Command is not installed or not in PATH."),
-    ("timed out", "Operation timed out — consider a longer timeout or simpler approach."),
-    ("name or service not known", "DNS resolution failed — check the hostname."),
-    ("disk quota exceeded", "Out of disk space."),
-    ("connection timed out", "Network timeout — host may be unreachable."),
-]
-
-
-def _verify_tool_result(tool_name: str, result: str) -> str:
-    """Check a tool result for common problems and annotate if issues found.
-
-    Returns the result string, possibly with a [NOTE] appended.
-    Pure string matching — no LLM calls.
-    """
-    if not result or result.strip() == "(no output)":
-        return result + "\n[NOTE: Tool returned empty/no output. Verify the command was correct.]"
-
-    result_lower = result.lower()
-
-    # Check for non-zero exit codes in bash output
-    if "(exit code:" in result_lower and "(exit code: 0)" not in result_lower:
-        for pattern, hint in _ERROR_PATTERNS:
-            if pattern in result_lower:
-                return result + f"\n[NOTE: {hint}]"
-        return result + "\n[NOTE: Command exited with non-zero status. Check the output for errors.]"
-
-    # Check for error patterns even without exit codes (web_fetch, MCP tools, etc.)
-    for pattern, hint in _ERROR_PATTERNS:
-        if pattern in result_lower:
-            return result + f"\n[NOTE: {hint}]"
-
-    return result
-
-
 class Agent:
     """The orchestrator that ties LLM, memory, and MCP tools together."""
 
-    def __init__(self, config: Config, llm: LLMClient, memory: MemoryManager, mcp: MCPManager) -> None:
+    def __init__(
+        self,
+        config: Config,
+        llm: LLMClient,
+        memory: MemoryManager,
+        mcp: MCPManager,
+        tool_callback: Callable[[str, str, str], None] | None = None,
+    ) -> None:
         self.config = config
         self.llm = llm
         self.memory = memory
         self.mcp = mcp
         self.max_tool_rounds = 25  # safety limit on tool call loops
+        self.tool_callback = tool_callback
 
     async def process(self, message: str, session_id: str) -> str:
         """Process a user message and return the assistant's response."""
@@ -200,7 +172,9 @@ class Agent:
                     result = f"Tool error: {e}"
                     logger.exception(f"Tool call failed: {tc.name}")
 
-                result = _verify_tool_result(tc.name, result)
+                result = verify_tool_result(tc.name, result)
+                if self.tool_callback is not None:
+                    self.tool_callback(tc.name, tc.arguments, result)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

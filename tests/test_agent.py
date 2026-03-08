@@ -8,7 +8,8 @@ import pytest
 
 from luna.config import Config
 from luna.llm import LLMClient, LLMResponse
-from luna.agent import Agent, _build_system_prompt, _verify_tool_result
+from luna.agent import Agent, _build_system_prompt
+from luna.tools import verify_tool_result as _verify_tool_result
 from luna.memory import MemoryResult, MemoryManager
 
 

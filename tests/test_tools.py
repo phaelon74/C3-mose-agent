@@ -14,12 +14,14 @@ from luna.tools import (
     NATIVE_TOOLS,
     _check_blocked,
     _check_write_allowed,
+    _CODE_TASK_ALLOWED_TOOLS,
     _DELEGATE_ALLOWED_TOOLS,
     _get_delegate_tools,
     call_native_tool,
     init_workspace,
     init_tool_registry,
     is_native_tool,
+    verify_tool_result,
 )
 from luna.llm import LLMResponse, ToolCall
 from pathlib import Path
@@ -40,7 +42,7 @@ class TestToolRegistry:
         assert names == {
             "bash", "read_file", "write_file", "list_directory",
             "web_fetch", "web_search", "list_available_tools", "use_tool",
-            "summarize_paper", "delegate",
+            "summarize_paper", "delegate", "code_task",
         }
 
     def test_is_native_tool(self):
@@ -569,3 +571,185 @@ class TestSummarizePaper:
 
     def test_summarize_paper_in_delegate_allowed(self):
         assert "summarize_paper" in _DELEGATE_ALLOWED_TOOLS
+
+
+class TestCodeTask:
+    def test_code_task_not_in_delegate_allowed(self):
+        """Delegate sub-agent must not be able to spawn a code_task."""
+        assert "code_task" not in _DELEGATE_ALLOWED_TOOLS
+
+    def test_code_task_not_recursive(self):
+        """code_task must not be in its own allowed tools."""
+        assert "code_task" not in _CODE_TASK_ALLOWED_TOOLS
+
+    def test_delegate_not_in_code_task_allowed(self):
+        """code_task must not be able to spawn delegate."""
+        assert "delegate" not in _CODE_TASK_ALLOWED_TOOLS
+
+    def test_use_tool_not_in_code_task_allowed(self):
+        """code_task must not be able to call MCP meta-tools."""
+        assert "use_tool" not in _CODE_TASK_ALLOWED_TOOLS
+        assert "list_available_tools" not in _CODE_TASK_ALLOWED_TOOLS
+
+    @pytest.mark.asyncio
+    async def test_missing_task_error(self):
+        result = await call_native_tool("code_task", {})
+        assert "Error" in result
+        assert "'task' is required" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_llm_error(self):
+        result = await call_native_tool("code_task", {"task": "write hello"}, llm=None)
+        assert "Error" in result
+        assert "LLM" in result
+
+    @pytest.mark.asyncio
+    async def test_simple_code_task(self):
+        """LLM returns content directly (no tool calls)."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(return_value=LLMResponse(content="Script written and tested."))
+
+        result = await call_native_tool(
+            "code_task",
+            {"task": "Write a hello world script"},
+            llm=mock_llm,
+        )
+        assert result == "Script written and tested."
+        mock_llm.chat.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_with_tool_calls(self):
+        """Sub-agent uses tools and iterates."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="tc1", name="write_file", arguments='{"path": "hello.py", "content": "print(1)"}'),
+                ],
+            ),
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCall(id="tc2", name="bash", arguments='{"command": "python hello.py"}'),
+                ],
+            ),
+            LLMResponse(content="Script works. Output: 1"),
+        ])
+
+        result = await call_native_tool(
+            "code_task",
+            {"task": "Write and run a script"},
+            llm=mock_llm,
+        )
+        assert "Script works" in result
+        assert mock_llm.chat.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_blocks_disallowed_tools(self):
+        """Sub-agent cannot use delegate, use_tool, or code_task."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCall(id="tc1", name="delegate", arguments='{"task": "recurse"}')],
+            ),
+            LLMResponse(content="Done."),
+        ])
+
+        result = await call_native_tool(
+            "code_task",
+            {"task": "Try to recurse"},
+            llm=mock_llm,
+        )
+        assert result == "Done."
+
+    @pytest.mark.asyncio
+    async def test_working_dir_created(self, setup_workspace):
+        """Working directory is created within workspace."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(return_value=LLMResponse(content="Done."))
+
+        await call_native_tool(
+            "code_task",
+            {"task": "test task", "working_dir": "my_project"},
+            llm=mock_llm,
+        )
+        assert (setup_workspace / "my_project").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_auto_working_dir_name(self, setup_workspace):
+        """Working dir name auto-derived from task when not specified."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(return_value=LLMResponse(content="Done."))
+
+        await call_native_tool(
+            "code_task",
+            {"task": "Fetch GitHub trending repos"},
+            llm=mock_llm,
+        )
+        # Should create a dir with a sanitized version of the task
+        dirs = [d.name for d in setup_workspace.iterdir() if d.is_dir()]
+        assert len(dirs) == 1
+        assert "fetch" in dirs[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_low_temperature(self):
+        """All LLM calls use temperature=0.4."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command": "echo hi"}')],
+            ),
+            LLMResponse(content="Done."),
+        ])
+
+        await call_native_tool(
+            "code_task",
+            {"task": "test"},
+            llm=mock_llm,
+        )
+
+        for call in mock_llm.chat.call_args_list:
+            assert call[1].get("temperature") == 0.4
+
+    @pytest.mark.asyncio
+    async def test_verify_tool_result_called(self):
+        """Error annotations are applied to inner tool results."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command": "false"}')],
+            ),
+            LLMResponse(content="Failed."),
+        ])
+
+        await call_native_tool(
+            "code_task",
+            {"task": "run failing command"},
+            llm=mock_llm,
+        )
+
+        # The tool result message should have the [NOTE] annotation from verify_tool_result
+        second_call_messages = mock_llm.chat.call_args_list[1][0][0]
+        tool_msg = [m for m in second_call_messages if m.get("role") == "tool"][0]
+        assert "[NOTE:" in tool_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_context_in_system_prompt(self):
+        """Optional context is included in the system prompt."""
+        mock_llm = MagicMock()
+        mock_llm.chat = AsyncMock(return_value=LLMResponse(content="Done."))
+
+        await call_native_tool(
+            "code_task",
+            {"task": "do something", "context": "We use Python 3.12"},
+            llm=mock_llm,
+        )
+
+        call_args = mock_llm.chat.call_args
+        messages = call_args[0][0]
+        system_msg = messages[0]["content"]
+        assert "Python 3.12" in system_msg
