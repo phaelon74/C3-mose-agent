@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any, Callable
 
@@ -111,12 +112,18 @@ class Agent:
         self.max_tool_rounds = 25  # safety limit on tool call loops
         self.tool_callback = tool_callback
 
-    async def process(self, message: str, session_id: str) -> str:
+    async def process(
+        self,
+        message: str,
+        session_id: str,
+        status_callback: Callable[[str, str], Any] | None = None,
+    ) -> str:
         """Process a user message and return the assistant's response."""
         with log_duration(logger, "agent_process", session_id=session_id):
-            return await self._process_inner(message, session_id)
+            return await self._process_inner(message, session_id, status_callback)
 
-    async def _process_inner(self, message: str, session_id: str) -> str:
+    async def _process_inner(self, message: str, session_id: str,
+                              status_callback: Callable[[str, str], Any] | None = None) -> str:
         # 1. Save user message
         self.memory.save_message(session_id, "user", message)
 
@@ -160,6 +167,15 @@ class Agent:
             # Execute each tool call
             for tc in response.tool_calls:
                 log_event(logger, "tool_executing", tool=tc.name, session_id=session_id)
+
+                if status_callback is not None:
+                    try:
+                        ret = status_callback(tc.name, tc.arguments)
+                        if inspect.isawaitable(ret):
+                            await ret
+                    except Exception:
+                        logger.debug("Status callback failed", exc_info=True)
+
                 try:
                     if is_native_tool(tc.name):
                         result = await call_native_tool(
@@ -193,11 +209,27 @@ class Agent:
             })
             response = await self.llm.chat(messages)
 
-        # 8. Save assistant response
-        content = response.content or "(no response)"
+        # 8. Thinking retry — model produced only reasoning after tool use
+        content = response.content
+        if not content and rounds > 0 and response.reasoning_content:
+            log_event(logger, "thinking_retry", session_id=session_id, rounds=rounds,
+                      reasoning_len=len(response.reasoning_content))
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You used tools and got results, but your last response was empty. "
+                    "Please summarize what you found and answer the user's question."
+                ),
+            })
+            response = await self.llm.chat(messages)  # no tools — forces text
+            content = response.content
+
+        content = content or "(no response)"
+
+        # 9. Save assistant response
         self.memory.save_message(session_id, "assistant", content)
 
-        # 9. Periodic maintenance
+        # 10. Periodic maintenance
         if self.memory.should_summarize(session_id):
             try:
                 await self.memory.summarize_and_extract(session_id, self.llm)

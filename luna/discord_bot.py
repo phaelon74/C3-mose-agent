@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import discord
 
@@ -54,6 +55,33 @@ def _split_message(text: str) -> list[str]:
     return chunks
 
 
+def _format_status(tool_name: str, arguments: str) -> str:
+    """Format a tool call into a short Discord status message."""
+    try:
+        args = json.loads(arguments) if arguments else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+
+    if tool_name == "web_search":
+        return f"\U0001f50d Searching: {args.get('query', arguments)}"
+    if tool_name == "web_fetch":
+        return f"\U0001f4c4 Reading {args.get('url', arguments)}"
+    if tool_name == "bash":
+        cmd = args.get("command", arguments)
+        if len(cmd) > 80:
+            cmd = cmd[:77] + "..."
+        return f"\u2699\ufe0f Running: `{cmd}`"
+    if tool_name == "read_file":
+        return f"\U0001f4c2 Reading {args.get('path', arguments)}"
+    if tool_name == "write_file":
+        return f"\u270f\ufe0f Writing {args.get('path', arguments)}"
+    if tool_name in ("delegate", "code_task"):
+        return f"\U0001f916 Working: {args.get('task', arguments)}"
+    if tool_name == "use_tool":
+        return f"\U0001f527 Using {args.get('name', arguments)}"
+    return f"\u2699\ufe0f {tool_name}..."
+
+
 class LunaDiscordBot(discord.Client):
     """Discord client that relays messages to the Luna agent."""
 
@@ -94,9 +122,17 @@ class LunaDiscordBot(discord.Client):
                   author=str(message.author), channel=str(message.channel))
 
         # Show typing indicator while processing
+        async def _send_status(tool_name: str, arguments: str) -> None:
+            status = _format_status(tool_name, arguments)
+            try:
+                await message.channel.send(status)
+            except Exception:
+                pass  # non-critical
+
         async with message.channel.typing():
             try:
-                response = await self.agent.process(content, session_id)
+                response = await self.agent.process(content, session_id,
+                                                    status_callback=_send_status)
             except Exception:
                 logger.exception("Agent processing failed")
                 response = "Sorry, I encountered an error processing your message."

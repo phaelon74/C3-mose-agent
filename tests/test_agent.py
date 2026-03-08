@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
 from luna.config import Config
-from luna.llm import LLMClient, LLMResponse
+from luna.llm import LLMClient, LLMResponse, ToolCall
 from luna.agent import Agent, _build_system_prompt
 from luna.tools import verify_tool_result as _verify_tool_result
 from luna.memory import MemoryResult, MemoryManager
@@ -75,6 +75,90 @@ class TestAgent:
         assert len(messages) == 2
         assert messages[0]["role"] == "user"
         assert messages[1]["role"] == "assistant"
+
+    async def test_thinking_retry_after_tool_rounds(self, agent):
+        """When model returns only reasoning after tool use, agent retries without tools."""
+        tool_response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command":"echo hi"}')],
+        )
+        # After tool use: only reasoning, no content
+        thinking_only = LLMResponse(content=None, reasoning_content="Let me think about this...")
+        # Retry response: real content
+        retry_response = LLMResponse(content="Here is the answer.")
+
+        agent.llm.chat = AsyncMock(side_effect=[tool_response, thinking_only, retry_response])
+
+        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
+            result = await agent.process("run echo", "test-session")
+
+        assert result == "Here is the answer."
+        # 3 calls: initial, after tool, retry
+        assert agent.llm.chat.call_count == 3
+        # Last call should have no tools (forces text)
+        last_call_kwargs = agent.llm.chat.call_args_list[2]
+        assert "tools" not in last_call_kwargs.kwargs or last_call_kwargs.kwargs.get("tools") is None
+
+    async def test_no_retry_when_content_exists(self, agent):
+        """No thinking retry when the model already returned content."""
+        tool_response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command":"echo hi"}')],
+        )
+        # After tool use: has both reasoning and content
+        final_response = LLMResponse(
+            content="Got it, here's the result.",
+            reasoning_content="Let me think...",
+        )
+
+        agent.llm.chat = AsyncMock(side_effect=[tool_response, final_response])
+
+        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
+            result = await agent.process("run echo", "test-session")
+
+        assert result == "Got it, here's the result."
+        # Only 2 calls: initial + after tool. No retry.
+        assert agent.llm.chat.call_count == 2
+
+    async def test_status_callback_called_before_tool(self, agent):
+        """Status callback fires before tool execution, with correct args."""
+        tool_response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command":"ls"}')],
+        )
+        final_response = LLMResponse(content="Done.")
+        agent.llm.chat = AsyncMock(side_effect=[tool_response, final_response])
+
+        call_order = []
+        status_cb = AsyncMock(side_effect=lambda n, a: call_order.append(("status", n)))
+
+        async def mock_tool(*args, **kwargs):
+            call_order.append(("tool", args[0]))
+            return "file.txt"
+
+        with patch("luna.agent.call_native_tool", side_effect=mock_tool):
+            await agent.process("list files", "test-session", status_callback=status_cb)
+
+        status_cb.assert_called_once_with("bash", '{"command":"ls"}')
+        # Status fires before tool execution
+        assert call_order == [("status", "bash"), ("tool", "bash")]
+
+    async def test_status_callback_failure_ignored(self, agent):
+        """If the status callback raises, the agent continues normally."""
+        tool_response = LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="tc1", name="bash", arguments='{"command":"ls"}')],
+        )
+        final_response = LLMResponse(content="Done.")
+        agent.llm.chat = AsyncMock(side_effect=[tool_response, final_response])
+
+        failing_cb = AsyncMock(side_effect=RuntimeError("Discord is down"))
+
+        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="file.txt"):
+            result = await agent.process("list files", "test-session", status_callback=failing_cb)
+
+        assert result == "Done."
+        failing_cb.assert_called_once()
 
 
 class TestVerifyToolResult:
