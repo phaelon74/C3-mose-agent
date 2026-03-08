@@ -9,3 +9,4 @@ build/
 data/
 .claude/
 writeups
+mcp_servers.json

@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "paper_db": {
+      "command": ".venv/bin/python",
+      "args": ["data/workspace/paper_db/paper_db_server.py"],
+      "transport": "stdio"
+    }
+  }
+}

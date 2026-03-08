@@ -1,9 +1,0 @@
-{
-  "servers": {
-    "paper_db": {
-      "command": "/home/fabio/luna-agent/.venv/bin/python",
-      "args": ["/home/fabio/luna-agent/data/workspace/paper_db/paper_db_server.py"],
-      "transport": "stdio"
-    }
-  }
-}
