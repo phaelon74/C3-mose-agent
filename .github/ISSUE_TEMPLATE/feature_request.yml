@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a new feature for Luna Agent
+description: Suggest a new feature for Mose Agent
 labels: [enhancement]
 body:
   - type: textarea

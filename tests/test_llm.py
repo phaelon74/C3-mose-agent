@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from luna.config import LLMConfig
-from luna.llm import LLMClient, LLMResponse, ToolCall
+from mose.config import LLMConfig
+from mose.llm import LLMClient, LLMResponse, ToolCall
 
 
 class TestLLMResponse:

@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in Luna Agent
+description: Report a bug in Mose Agent
 labels: [bug]
 body:
   - type: textarea

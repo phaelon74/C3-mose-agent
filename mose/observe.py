@@ -1,4 +1,4 @@
-"""Structured JSON logging for all Luna components."""
+"""Structured JSON logging for all Mose components."""
 
 from __future__ import annotations
 
@@ -34,13 +34,13 @@ def setup_logging(log_dir: str, log_level: str = "INFO") -> None:
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    root = logging.getLogger("luna")
+    root = logging.getLogger("mose")
     root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     root.handlers.clear()
 
     # JSON file handler — one file per day
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    fh = logging.FileHandler(log_path / f"luna-{today}.jsonl", encoding="utf-8")
+    fh = logging.FileHandler(log_path / f"mose-{today}.jsonl", encoding="utf-8")
     fh.setFormatter(JSONFormatter())
     root.addHandler(fh)
 
@@ -51,8 +51,8 @@ def setup_logging(log_dir: str, log_level: str = "INFO") -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a child logger under the 'luna' namespace."""
-    return logging.getLogger(f"luna.{name}")
+    """Get a child logger under the 'mose' namespace."""
+    return logging.getLogger(f"mose.{name}")
 
 
 def log_event(logger: logging.Logger, event: str, level: int = logging.INFO, **data: Any) -> None:

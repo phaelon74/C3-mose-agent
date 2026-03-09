@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from luna.config import LLMConfig
-from luna.llm import (
+from mose.config import LLMConfig
+from mose.llm import (
     BedrockClient,
     LLMClient,
     LLMResponse,

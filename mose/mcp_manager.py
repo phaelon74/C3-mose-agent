@@ -9,7 +9,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from luna.observe import get_logger, log_event, log_duration
+from mose.observe import get_logger, log_event, log_duration
 
 logger = get_logger("mcp")
 

@@ -20,11 +20,19 @@ class LLMConfig:
     model: str = "worker-agent"
     max_tokens: int = 16384
     temperature: float = 1.0
+    context_window: int = 98304
 
 
 @dataclass
 class DiscordConfig:
     token: str = ""
+
+
+@dataclass
+class SignalConfig:
+    phone_number: str = ""
+    daemon_host: str = "127.0.0.1"
+    daemon_port: int = 7583
 
 
 @dataclass
@@ -52,12 +60,15 @@ class ObserveConfig:
 class AgentConfig:
     workspace: str = "data/workspace"
     allow_read_outside: bool = True
+    skills_path: str = "skills"
+    recent_messages_limit: int = 15
 
 
 @dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    signal: SignalConfig = field(default_factory=SignalConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     observe: ObserveConfig = field(default_factory=ObserveConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
@@ -85,6 +96,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.llm, raw["llm"])
         if "discord" in raw:
             _apply_section(cfg.discord, raw["discord"])
+        if "signal" in raw:
+            _apply_section(cfg.signal, raw["signal"])
         if "memory" in raw:
             _apply_section(cfg.memory, raw["memory"])
         if "observe" in raw:
@@ -95,10 +108,14 @@ def load_config(config_path: Path | None = None) -> Config:
     # Env var overrides
     if token := os.environ.get("DISCORD_TOKEN"):
         cfg.discord.token = token
+    if phone := os.environ.get("SIGNAL_PHONE"):
+        cfg.signal.phone_number = phone
     if endpoint := os.environ.get("LLM_ENDPOINT"):
         cfg.llm.endpoint = endpoint
     if model := os.environ.get("LLM_MODEL"):
         cfg.llm.model = model
+    if ctx := os.environ.get("LLM_CONTEXT_WINDOW"):
+        cfg.llm.context_window = int(ctx)
     if db_path := os.environ.get("MEMORY_DB_PATH"):
         cfg.memory.db_path = db_path
     if log_dir := os.environ.get("LOG_DIR"):
@@ -111,5 +128,7 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.observe.log_dir = str(cfg.root_dir / cfg.observe.log_dir)
     if not Path(cfg.agent.workspace).is_absolute():
         cfg.agent.workspace = str(cfg.root_dir / cfg.agent.workspace)
+    if not Path(cfg.agent.skills_path).is_absolute():
+        cfg.agent.skills_path = str(cfg.root_dir / cfg.agent.skills_path)
 
     return cfg

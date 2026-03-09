@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from luna.tool_output import (
+from mose.tool_output import (
     LARGE_OUTPUT_THRESHOLD,
     _persist_output,
     _python_filter,

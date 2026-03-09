@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from luna.config import Config
-from luna.llm import LLMClient, LLMResponse, ToolCall
-from luna.agent import Agent, _build_system_prompt
-from luna.tools import verify_tool_result as _verify_tool_result
-from luna.memory import MemoryResult, MemoryManager
+from mose.config import Config
+from mose.llm import LLMClient, LLMResponse, ToolCall
+from mose.agent import Agent, _build_system_prompt, _load_skills
+from mose.tools import verify_tool_result as _verify_tool_result
+from mose.memory import MemoryResult, MemoryManager
 
 
 class TestSystemPrompt:
     def test_empty_memories(self):
         prompt = _build_system_prompt([], None, "2026-01-01T00:00:00Z")
-        assert "Luna" in prompt
+        assert "Mose" in prompt
         assert "2026-01-01" in prompt
 
     def test_with_memories(self):
@@ -33,20 +34,94 @@ class TestSystemPrompt:
         assert "They discussed AI." in prompt
 
     def test_with_workspace(self):
-        prompt = _build_system_prompt([], None, "2026-01-01T00:00:00Z", workspace="/home/fabio/workspace")
-        assert "/home/fabio/workspace" in prompt
+        prompt = _build_system_prompt([], None, "2026-01-01T00:00:00Z", workspace="/home/Mose/workspace")
+        assert "/home/Mose/workspace" in prompt
+
+    def test_with_skills_path_empty_dir(self, tmp_path):
+        """Skills path to non-existent dir yields no skills section."""
+        prompt = _build_system_prompt(
+            [], None, "2026-01-01T00:00:00Z",
+            workspace="/home", skills_path=str(tmp_path / "nonexistent"),
+        )
+        assert "Cloud3 SRE" not in prompt
+
+    def test_with_skills_path_valid(self, tmp_path):
+        """Skills path with .md files yields Cloud3 SRE section."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "test.md").write_text("# Test Skill\nContent here.")
+        prompt = _build_system_prompt(
+            [], None, "2026-01-01T00:00:00Z",
+            workspace="/home", skills_path=str(skills_dir),
+        )
+        assert "Cloud3 SRE" in prompt
+        assert "Test Skill" in prompt
+        assert "Content here" in prompt
+
+
+class TestLoadSkills:
+    def test_missing_dir_returns_empty(self, tmp_path):
+        result = _load_skills(tmp_path / "nonexistent")
+        assert result == ""
+
+    def test_empty_dir_returns_empty(self, tmp_path):
+        (tmp_path / "skills").mkdir()
+        result = _load_skills(tmp_path / "skills")
+        assert result == ""
+
+    def test_loads_single_file(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "foo.md").write_text("Hello from foo")
+        result = _load_skills(skills_dir)
+        assert "Hello from foo" in result
+
+    def test_loads_multiple_files_sorted(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "z_last.md").write_text("Last")
+        (skills_dir / "_overview.md").write_text("Overview first")
+        (skills_dir / "a_first.md").write_text("First")
+        result = _load_skills(skills_dir)
+        # _overview should come first
+        assert result.startswith("Overview first")
+        assert "---" in result
+        assert "First" in result
+        assert "Last" in result
+
+    def test_bad_file_continues_with_others(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "_overview.md").write_text("Overview")
+        (skills_dir / "good.md").write_text("Good content")
+        (skills_dir / "bad.md").write_text("Bad")
+
+        read_count = [0]
+        original_read = Path.read_text
+
+        def failing_read(self, *a, **k):
+            read_count[0] += 1
+            if self.name == "bad.md":
+                raise OSError("read failed")
+            return original_read(self, *a, **k)
+
+        with patch.object(Path, "read_text", failing_read):
+            result = _load_skills(skills_dir)
+        assert "Overview" in result
+        assert "Good content" in result
 
 
 class TestAgent:
     @pytest.fixture
     def agent(self, tmp_path):
-        from luna.config import MemoryConfig
-        from luna.observe import setup_logging
+        from mose.config import MemoryConfig
+        from mose.observe import setup_logging
 
         setup_logging(str(tmp_path / "logs"), "DEBUG")
 
         config = Config()
         config.memory.db_path = str(tmp_path / "test.db")
+        config.agent.skills_path = str(tmp_path / "noskills")  # No skills in unit tests
 
         llm = MagicMock(spec=LLMClient)
         llm.chat = AsyncMock(return_value=LLMResponse(content="Hello!"))
@@ -89,7 +164,7 @@ class TestAgent:
 
         agent.llm.chat = AsyncMock(side_effect=[tool_response, thinking_only, retry_response])
 
-        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
+        with patch("mose.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
             result = await agent.process("run echo", "test-session")
 
         assert result == "Here is the answer."
@@ -113,7 +188,7 @@ class TestAgent:
 
         agent.llm.chat = AsyncMock(side_effect=[tool_response, final_response])
 
-        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
+        with patch("mose.agent.call_native_tool", new_callable=AsyncMock, return_value="hi\n"):
             result = await agent.process("run echo", "test-session")
 
         assert result == "Got it, here's the result."
@@ -136,7 +211,7 @@ class TestAgent:
             call_order.append(("tool", args[0]))
             return "file.txt"
 
-        with patch("luna.agent.call_native_tool", side_effect=mock_tool):
+        with patch("mose.agent.call_native_tool", side_effect=mock_tool):
             await agent.process("list files", "test-session", status_callback=status_cb)
 
         status_cb.assert_called_once_with("bash", '{"command":"ls"}')
@@ -154,7 +229,7 @@ class TestAgent:
 
         failing_cb = AsyncMock(side_effect=RuntimeError("Discord is down"))
 
-        with patch("luna.agent.call_native_tool", new_callable=AsyncMock, return_value="file.txt"):
+        with patch("mose.agent.call_native_tool", new_callable=AsyncMock, return_value="file.txt"):
             result = await agent.process("list files", "test-session", status_callback=failing_cb)
 
         assert result == "Done."

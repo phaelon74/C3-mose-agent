@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Luna Agent" width="120" height="120">
+  <img src="assets/logo.svg" alt="Mose Agent" width="120" height="120">
 </p>
 
-<h1 align="center">Luna Agent</h1>
+<h1 align="center">Mose Agent</h1>
 
 <p align="center">
   A custom minimal AI agent with persistent memory, MCP tool integration, Discord/CLI interface, and structured observability.<br>
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/nonatofabio/luna-agent/actions/workflows/tests.yml"><img src="https://github.com/nonatofabio/luna-agent/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/phaelon74/C3-luna-agent/actions/workflows/tests.yml"><img src="https://github.com/phaelon74/C3-luna-agent/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
 </p>
@@ -36,7 +36,7 @@ Discord (discord.py)     CLI REPL (no token)
      |                        |
      v                        v
 +---------------------------------+
-|        Luna Agent Core          |
+|        Mose Agent Core          |
 |                                 |
 |  agent.py                       |  agent loop: msg → memory → prompt → LLM → tools → respond
 |    ├── llm.py                   |  single LLM client, configurable endpoint
@@ -54,7 +54,7 @@ Discord (discord.py)     CLI REPL (no token)
 
 All LLM traffic flows through a single `LLMClient` with a configurable endpoint URL. Today it points at `localhost:8001` (llama-server). To insert an AI firewall later, change the URL to `localhost:9000` — zero code changes required.
 
-**Thinking model support:** Luna handles reasoning models (Qwen3.5, etc.) automatically — extracting `reasoning_content`, falling back to cleaned reasoning when content is empty, and stripping leaked markup (`<thinking>`, `<tool_call>`, etc.) from output.
+**Thinking model support:** Mose handles reasoning models (Qwen3.5, etc.) automatically — extracting `reasoning_content`, falling back to cleaned reasoning when content is empty, and stripping leaked markup (`<thinking>`, `<tool_call>`, etc.) from output.
 
 ## Hardware
 
@@ -66,7 +66,7 @@ All LLM traffic flows through a single `LLMClient` with a configurable endpoint 
 ## Quick Start
 
 ```bash
-cd ~/luna-agent
+cd ~/mose-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -75,21 +75,21 @@ pip install -e ".[dev]"
 pytest tests/ -v
 
 # Run without Discord (interactive CLI REPL)
-python -m luna
+python -m mose
 
 # Run with Discord
-DISCORD_TOKEN=your-token-here python -m luna
+DISCORD_TOKEN=your-token-here python -m mose
 ```
 
 ## Project Structure
 
 ```
-luna-agent/
+mose-agent/
 ├── config.toml              # All configuration
 ├── mcp_servers.json         # MCP server registry
 ├── pyproject.toml           # Dependencies
-├── luna/
-│   ├── __main__.py          # Entry point (python -m luna)
+├── mose/
+│   ├── __main__.py          # Entry point (python -m mose)
 │   ├── agent.py             # Core agent loop
 │   ├── llm.py               # LLM client (OpenAI-compatible)
 │   ├── memory.py            # Memory (SQLite + FTS5 + sqlite-vec)
@@ -105,12 +105,12 @@ luna-agent/
 │   ├── test_memory.py       # Memory system tests
 │   ├── test_tools.py        # Native tool tests
 │   └── test_tool_output.py  # Output pipeline tests
-├── luna-agent.service        # systemd unit for the agent
+├── mose-agent.service        # systemd unit for the agent
 ├── worker-agent.service      # systemd unit for llama-server (Qwen3.5-35B-A3B)
 └── data/                     # Created at runtime
     ├── memory.db             # SQLite database
     ├── logs/                 # JSON log files
-    │   └── luna-YYYY-MM-DD.jsonl
+    │   └── mose-YYYY-MM-DD.jsonl
     └── tool_outputs/         # Persisted large tool outputs
 ```
 
@@ -255,7 +255,7 @@ Long responses are split at newlines (preferred), spaces, or hard-split at 2000 
 Every LLM call, tool execution, memory operation, and Discord message is logged as structured JSON.
 
 **Dual output:**
-- **File** — `data/logs/luna-YYYY-MM-DD.jsonl`, one file per day, machine-parseable
+- **File** — `data/logs/mose-YYYY-MM-DD.jsonl`, one file per day, machine-parseable
 - **Console** — human-readable format for development
 
 **What's logged:**
@@ -274,11 +274,11 @@ Every LLM call, tool execution, memory operation, and Discord message is logged 
 
 ```bash
 # Watch logs in real-time
-tail -f data/logs/luna-*.jsonl
+tail -f data/logs/mose-*.jsonl
 
 # Search with jq
-jq 'select(.event == "llm_response")' data/logs/luna-*.jsonl
-jq 'select(.latency_ms > 5000)' data/logs/luna-*.jsonl
+jq 'select(.event == "llm_response")' data/logs/mose-*.jsonl
+jq 'select(.latency_ms > 5000)' data/logs/mose-*.jsonl
 ```
 
 ### Config (`config.py`)
@@ -290,18 +290,18 @@ Dataclass-based configuration loaded from `config.toml` with environment variabl
 Copy the systemd service files and enable them:
 
 ```bash
-sudo cp luna-agent.service /etc/systemd/system/
+sudo cp mose-agent.service /etc/systemd/system/
 sudo cp worker-agent.service /etc/systemd/system/
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now worker-agent    # Start LLM server (Qwen3.5-35B-A3B) first
-sudo systemctl enable --now luna-agent      # Then the agent (depends on worker-agent)
+sudo systemctl enable --now mose-agent      # Then the agent (depends on worker-agent)
 ```
 
 **Monitor:**
 
 ```bash
-journalctl -u luna-agent -f
+journalctl -u mose-agent -f
 journalctl -u worker-agent -f
 ```
 
@@ -340,4 +340,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull 
 
 ## License
 
-[MIT](LICENSE) — Fabio Nonato, 2026
+[MIT](LICENSE) — Phaedawg, 2026

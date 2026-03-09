@@ -1,0 +1,14 @@
+[Unit]
+Description=signal-cli JSON-RPC Daemon (requires signal-cli 0.14.0+)
+After=network-online.target
+
+[Service]
+Type=simple
+User=Mose
+# Edit ExecStart: replace +YOUR_PHONE_NUMBER with your linked Signal number (e.g. +1234567890)
+ExecStart=/opt/signal-cli/bin/signal-cli -a +YOUR_PHONE_NUMBER daemon --tcp=127.0.0.1:7583
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

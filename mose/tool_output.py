@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
-from luna.observe import get_logger, log_event
+from mose.observe import get_logger, log_event
 
 logger = get_logger("tool_output")
 

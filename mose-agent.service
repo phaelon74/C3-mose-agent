@@ -1,0 +1,19 @@
+[Unit]
+Description=Mose Agent - Custom AI Assistant
+After=network-online.target worker-agent.service signal-cli-daemon.service
+Wants=network-online.target signal-cli-daemon.service
+Requires=worker-agent.service
+
+[Service]
+Type=simple
+User=Mose
+WorkingDirectory=/home/Mose/mose-agent
+EnvironmentFile=-/home/Mose/mose-agent/.env
+ExecStart=/home/Mose/mose-agent/.venv/bin/python -m mose
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

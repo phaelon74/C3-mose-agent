@@ -8,9 +8,9 @@ import time
 
 import pytest
 
-from luna.config import MemoryConfig
-from luna.memory import MemoryManager
-from luna.observe import setup_logging
+from mose.config import MemoryConfig
+from mose.memory import MemoryManager
+from mose.observe import setup_logging
 
 
 @pytest.fixture

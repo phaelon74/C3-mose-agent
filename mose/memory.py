@@ -11,8 +11,8 @@ from typing import Any
 
 import sqlite_vec
 
-from luna.config import MemoryConfig
-from luna.observe import get_logger, log_event
+from mose.config import MemoryConfig
+from mose.observe import get_logger, log_event
 
 logger = get_logger("memory")
 

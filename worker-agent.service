@@ -1,27 +1,21 @@
 [Unit]
-Description=Worker Agent - Qwen3.5-35B-A3B Q8_0 llama-server (dual RTX 3090)
+Description=Worker Agent - Qwen3.5-27B-AWQ SGLang (4x RTX 3060)
 After=network-online.target
 
 [Service]
 Type=simple
-User=fabio
-WorkingDirectory=/home/fabio/unsloth
+User=Mose
+WorkingDirectory=/home/Mose/mose-agent
 Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
-ExecStart=/home/fabio/unsloth/llama.cpp/build/bin/llama-server \
-  --model /data/models/Qwen3.5-35B-A3B-Q8_0.gguf \
-  --alias "worker-agent" \
-  --host 0.0.0.0 \
+ExecStart=/home/Mose/mose-agent/.venv/bin/python -m sglang.launch_server \
+  --model-path QuantTrio/Qwen3.5-27B-AWQ \
   --port 8001 \
-  --n-gpu-layers 999 \
-  --split-mode layer \
-  --tensor-split 1,1 \
-  --ctx-size 131072 \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
-  --threads 16 \
-  --batch-size 2048 \
-  --jinja \
-  --seed 3407
+  --tp-size 4 \
+  --mem-fraction-static 0.85 \
+  --context-length 98304 \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen3_coder \
+  --host 0.0.0.0
 Restart=always
 RestartSec=10
 

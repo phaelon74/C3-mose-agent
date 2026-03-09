@@ -1,4 +1,4 @@
-# Luna Agent Smoke Tests
+# Mose Agent Smoke Tests
 
 Manual test cases to run via Discord after any significant change (new model, prompt changes, tool updates).
 Start a **new thread** for each test run to avoid memory contamination.
@@ -76,14 +76,14 @@ For **every** test, verify:
 - [ ] No `<tool_call>` or `<function=...>` markup in the Discord message
 - [ ] No "(no response)" replies
 - [ ] Response is coherent and answers the question
-- [ ] Tool calls execute (check `journalctl -u luna-agent -f` for `tool_executing` events)
+- [ ] Tool calls execute (check `journalctl -u mose-agent -f` for `tool_executing` events)
 
 ## Quick Log Check
 
 ```bash
 # Watch live during testing
-journalctl -u luna-agent -f
+journalctl -u mose-agent -f
 
 # After testing, check for issues
-grep "thinking_fallback\|tool_loop_limit\|Tool error" data/logs/luna-$(date -u +%Y-%m-%d).jsonl
+grep "thinking_fallback\|tool_loop_limit\|Tool error" data/logs/mose-$(date -u +%Y-%m-%d).jsonl
 ```

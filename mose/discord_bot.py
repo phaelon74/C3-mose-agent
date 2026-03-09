@@ -2,17 +2,59 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from contextvars import ContextVar
 
 import discord
 
-from luna.agent import Agent
-from luna.observe import get_logger, log_event
+from mose.agent import Agent
+from mose.observe import get_logger, log_event
 
 logger = get_logger("discord")
 
 MAX_MESSAGE_LENGTH = 2000  # Discord's limit
+
+_approval_ctx: ContextVar[dict] = ContextVar("approval_ctx", default={})
+
+
+def set_approval_context(channel, author, bot) -> None:
+    """Set context for sre_execute approval (channel, author, bot)."""
+    _approval_ctx.set({"channel": channel, "author": author, "bot": bot})
+
+
+async def _discord_approval_callback(command: str, reason: str, target_system: str) -> bool:
+    """Prompt user for approval via Discord message. Waits for reply (y/yes/approve) within 60s."""
+    ctx = _approval_ctx.get()
+    if not ctx:
+        return False
+    channel = ctx.get("channel")
+    author = ctx.get("author")
+    bot = ctx.get("bot")
+    if not all([channel, author, bot]):
+        return False
+
+    embed = discord.Embed(title="SRE Execute Approval", description=reason, color=0x5865F2)
+    embed.add_field(name="System", value=target_system, inline=True)
+    embed.add_field(name="Command", value=f"```\n{command[:1000]}\n```", inline=False)
+    embed.set_footer(text="Reply with 'y', 'yes', or 'approve' within 60 seconds")
+
+    await channel.send(embed=embed)
+
+    def check(m: discord.Message) -> bool:
+        return m.channel == channel and m.author == author
+
+    try:
+        reply = await asyncio.wait_for(bot.wait_for("message", check=check), 60)
+    except asyncio.TimeoutError:
+        await channel.send("Approval timed out. Execution denied.")
+        return False
+
+    approved = reply.content.strip().lower() in ("y", "yes", "approve")
+    if not approved:
+        await channel.send("Execution denied.")
+    return approved
 
 
 def _session_id_for(message: discord.Message) -> str:
@@ -71,6 +113,11 @@ def _format_status(tool_name: str, arguments: str) -> str:
         if len(cmd) > 80:
             cmd = cmd[:77] + "..."
         return f"\u2699\ufe0f Running: `{cmd}`"
+    if tool_name == "sre_execute":
+        cmd = args.get("command", arguments)
+        if len(cmd) > 80:
+            cmd = cmd[:77] + "..."
+        return f"\u26a0\ufe0f Execute (approval required): `{cmd}`"
     if tool_name == "read_file":
         return f"\U0001f4c2 Reading {args.get('path', arguments)}"
     if tool_name == "write_file":
@@ -82,8 +129,8 @@ def _format_status(tool_name: str, arguments: str) -> str:
     return f"\u2699\ufe0f {tool_name}..."
 
 
-class LunaDiscordBot(discord.Client):
-    """Discord client that relays messages to the Luna agent."""
+class MoseDiscordBot(discord.Client):
+    """Discord client that relays messages to the Mose agent."""
 
     def __init__(self, agent: Agent) -> None:
         intents = discord.Intents.default()
@@ -120,6 +167,8 @@ class LunaDiscordBot(discord.Client):
         session_id = _session_id_for(message)
         log_event(logger, "discord_message", session_id=session_id,
                   author=str(message.author), channel=str(message.channel))
+
+        set_approval_context(message.channel, message.author, self)
 
         # Show typing indicator while processing
         async def _send_status(tool_name: str, arguments: str) -> None:

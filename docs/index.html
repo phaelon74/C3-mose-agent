@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Luna Agent</title>
+<title>Mose Agent</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;line-height:1.6}
@@ -35,7 +35,7 @@ footer{text-align:center;padding:2rem 0;color:#484f58;font-size:0.85rem;border-t
 <body>
 <div class="container">
 <header>
-<h1><span>&#127769;</span> Luna Agent</h1>
+<h1><span>&#127769;</span> Mose Agent</h1>
 <p class="tagline">Custom minimal AI agent with persistent memory, MCP tools, and Discord</p>
 <div class="badges">
 <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+">
@@ -78,7 +78,7 @@ Discord (discord.py)
      |
      v
 +-----------------------+
-|    Luna Agent Core    |
+|    Mose Agent Core    |
 |                       |
 |  agent.py             |  agent loop: msg -> memory -> prompt -> LLM -> tools -> respond
 |    +-- llm.py         |  single LLM client, configurable endpoint
@@ -97,8 +97,8 @@ Discord (discord.py)
 <h2>Quick Start</h2>
 <div class="quickstart"><code>
 <span class="comment"># Clone and install</span>
-git clone https://github.com/nonatofabio/luna-agent.git
-cd luna-agent
+git clone https://github.com/phaelon74/C3-luna-agent.git
+cd C3-luna-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -110,15 +110,15 @@ cp mcp_servers.example.json mcp_servers.json
 pytest tests/ -v
 
 <span class="comment"># Run the agent</span>
-python -m luna
+python -m mose
 </code></div>
 
 <div class="cta">
-<a href="https://github.com/nonatofabio/luna-agent" class="btn">View on GitHub</a>
+<a href="https://github.com/phaelon74/C3-luna-agent" class="btn">View on GitHub</a>
 </div>
 
 <footer>
-MIT License &mdash; Fabio Nonato, 2026
+MIT License &mdash; Phaedawg, 2026
 </footer>
 </div>
 </body>

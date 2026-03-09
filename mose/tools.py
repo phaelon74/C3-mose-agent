@@ -8,14 +8,14 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from luna.observe import get_logger, log_event
-from luna.tool_output import LLMExtractor, process_large_output
+from mose.observe import get_logger, log_event
+from mose.tool_output import LLMExtractor, process_large_output
 
 logger = get_logger("tools")
 
-BASH_MAX_OUTPUT = 50_000
+BASH_MAX_OUTPUT = 20_000  # reduced from 50_000 to lower context pressure per tool call
 BASH_DEFAULT_TIMEOUT = 30
 BASH_MAX_TIMEOUT = 120
 LIST_DIR_MAX_ENTRIES = 500
@@ -65,11 +65,20 @@ _allow_read_outside: bool = True
 # MCP manager — set by init_tool_registry() at startup
 _mcp_manager: "MCPManager | None" = None
 
+# Approval callback for sre_execute — set by init_approval() at startup
+_approval_callback: "Callable[[str, str, str], Any] | None" = None
+
 
 def init_tool_registry(mcp: "MCPManager") -> None:
     """Register the MCP manager so meta-tools can discover and call MCP tools."""
     global _mcp_manager
     _mcp_manager = mcp
+
+
+def init_approval(callback: Callable[[str, str, str], Any] | None) -> None:
+    """Register the approval callback for sre_execute. Callback receives (command, reason, target_system) and returns bool (or awaitable bool)."""
+    global _approval_callback
+    _approval_callback = callback
 
 
 def init_workspace(workspace: str, allow_read_outside: bool = True) -> None:
@@ -378,6 +387,40 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sre_execute",
+            "description": (
+                "Execute a command that modifies system state (restart, update, delete, etc.). "
+                "REQUIRES human approval before execution. Use bash for read-only operations. "
+                "Use this tool for anything that changes state: restarts, config changes, "
+                "package installs, data modifications."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this command needs to run.",
+                    },
+                    "target_system": {
+                        "type": "string",
+                        "description": "Which Cloud3 system this affects.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 30, max 120).",
+                    },
+                },
+                "required": ["command", "reason", "target_system"],
+            },
+        },
+    },
 ]
 
 _NATIVE_TOOL_NAMES: set[str] = {t["function"]["name"] for t in NATIVE_TOOLS}
@@ -453,6 +496,71 @@ async def _tool_bash(args: dict, **kwargs) -> str:
                 timeout=timeout,
             ),
             timeout=timeout + 5,  # extra margin for thread overhead
+        )
+    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+        return f"Error: Command timed out after {timeout}s"
+    except FileNotFoundError:
+        return f"Error: Working directory not found: {cwd}"
+
+    output = ""
+    if proc.stdout:
+        output += proc.stdout
+    if proc.stderr:
+        output += ("\n--- stderr ---\n" if output else "") + proc.stderr
+
+    if proc.returncode != 0:
+        output += f"\n(exit code: {proc.returncode})"
+
+    return _truncate(output, BASH_MAX_OUTPUT) if output else "(no output)"
+
+
+async def _tool_sre_execute(args: dict, **kwargs) -> str:
+    """Execute a state-changing command after human approval."""
+    command = args.get("command", "")
+    reason = args.get("reason", "")
+    target_system = args.get("target_system", "")
+    if not command:
+        return "Error: 'command' is required"
+    if not reason:
+        return "Error: 'reason' is required"
+    if not target_system:
+        return "Error: 'target_system' is required"
+
+    blocked = _check_blocked(command)
+    if blocked:
+        return blocked
+
+    if _approval_callback is None:
+        log_event(logger, "sre_execute_denied", reason="no_approval_callback", target_system=target_system)
+        return "Execution denied: no approval callback configured. Run with CLI or Discord to enable approval."
+
+    result = _approval_callback(command, reason, target_system)
+    if asyncio.iscoroutine(result):
+        approved = await result
+    else:
+        approved = bool(result)
+
+    if not approved:
+        log_event(logger, "sre_execute_denied", reason="operator_denied", target_system=target_system)
+        return "Execution denied by operator."
+
+    log_event(logger, "sre_execute_approved", target_system=target_system)
+    timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
+    cwd = _workspace and str(_workspace)
+
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.to_thread(
+                subprocess.run,
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                cwd=cwd,
+                timeout=timeout,
+            ),
+            timeout=timeout + 5,
         )
     except (asyncio.TimeoutError, subprocess.TimeoutExpired):
         return f"Error: Command timed out after {timeout}s"
@@ -589,7 +697,7 @@ async def _tool_web_fetch(args: dict, context: str = "", llm=None, root=None, **
         import urllib.error
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Luna-Agent/0.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Mose-Agent/0.1"})
             resp = await asyncio.to_thread(
                 lambda: urllib.request.urlopen(req, timeout=30).read().decode("utf-8", errors="replace")
             )
@@ -601,7 +709,7 @@ async def _tool_web_fetch(args: dict, context: str = "", llm=None, root=None, **
     else:
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-                resp = await client.get(url, headers={"User-Agent": "Luna-Agent/0.1"})
+                resp = await client.get(url, headers={"User-Agent": "Mose-Agent/0.1"})
                 resp.raise_for_status()
                 html = resp.text
         except Exception as e:
@@ -1034,6 +1142,7 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
 
 _TOOL_REGISTRY: dict[str, Any] = {
     "bash": _tool_bash,
+    "sre_execute": _tool_sre_execute,
     "read_file": _tool_read_file,
     "write_file": _tool_write_file,
     "list_directory": _tool_list_directory,

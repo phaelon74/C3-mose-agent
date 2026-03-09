@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Luna Agent — a minimal AI assistant with persistent memory, MCP tool use, and Discord/CLI interface. It runs on Fabio's homelab (dual RTX 3090s) using a local Qwen3.5-35B-A3B model via llama-server as the LLM backend.
+Mose Agent — a minimal AI assistant with persistent memory, MCP tool use, and Discord/CLI interface. It runs on a homelab (4x RTX 3060) using Qwen3.5-27B-AWQ via SGLang as the LLM backend.
 
 ## Commands
 
@@ -16,7 +16,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Run the agent (needs DISCORD_TOKEN env var for Discord, otherwise interactive CLI)
-python -m luna
+python -m mose
 
 # Run all tests
 pytest
@@ -26,9 +26,9 @@ pytest tests/test_memory.py
 pytest tests/test_agent.py::TestAgent::test_basic_response
 
 # Systemd services (the agent depends on the LLM server)
-sudo systemctl start worker-agent    # starts llama-server on port 8001 (Qwen3.5-35B-A3B)
-sudo systemctl start luna-agent      # starts the bot (requires worker-agent)
-journalctl -u luna-agent -f          # live logs
+sudo systemctl start worker-agent    # starts SGLang on port 8001 (Qwen3.5-27B-AWQ)
+sudo systemctl start mose-agent      # starts the bot (requires worker-agent)
+journalctl -u mose-agent -f          # live logs
 ```
 
 ## Architecture
@@ -46,7 +46,7 @@ Three tables: `memories` (long-term facts), `messages` (conversation history per
 
 **`mcp_manager.py`** — Connects to MCP servers defined in `mcp_servers.json` via stdio transport. Tools are namespaced as `{server}__{tool}` to avoid collisions. Tools are exposed to the LLM in OpenAI function-calling format.
 
-**`llm.py`** — Thin async wrapper around the OpenAI client, pointing at the local llama-server (`localhost:8001`). Returns `LLMResponse` dataclass with parsed tool calls.
+**`llm.py`** — Thin async wrapper around the OpenAI client, pointing at the local SGLang server (`localhost:8001`). Returns `LLMResponse` dataclass with parsed tool calls.
 
 **`tools.py`** — Native tools (bash, file I/O, web search/fetch, delegate, code_task, summarize_paper, MCP meta-tools) plus `verify_tool_result()` which annotates tool output with error hints. Sub-agent tools (`delegate`, `code_task`) get restricted tool subsets to prevent recursion.
 
@@ -54,13 +54,13 @@ Three tables: `memories` (long-term facts), `messages` (conversation history per
 
 **`__main__.py`** — Entry point. With `DISCORD_TOKEN`: starts Discord bot. Without: starts an interactive CLI REPL where tool calls print inline as they execute. Console log handlers are suppressed to WARNING in CLI mode.
 
-**`observe.py`** — Structured JSON logging (`data/logs/luna-YYYY-MM-DD.jsonl`). All components use `log_event()` for structured data and `log_duration()` context manager for latency tracking.
+**`observe.py`** — Structured JSON logging (`data/logs/mose-YYYY-MM-DD.jsonl`). All components use `log_event()` for structured data and `log_duration()` context manager for latency tracking.
 
-**`config.py`** — Loads `config.toml` with env var overrides (`DISCORD_TOKEN`, `LLM_ENDPOINT`, `LLM_MODEL`, `MEMORY_DB_PATH`, `LOG_DIR`). All config sections are dataclasses.
+**`config.py`** — Loads `config.toml` with env var overrides (`DISCORD_TOKEN`, `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_CONTEXT_WINDOW`, `MEMORY_DB_PATH`, `LOG_DIR`). All config sections are dataclasses.
 
 ## Key Design Decisions
 
-- **No API key needed** for the LLM — llama-server doesn't require auth
+- **No API key needed** for the LLM — SGLang doesn't require auth
 - **Embedding model lazy-loads** on first `search()` call; tests that don't need embeddings mock `memory.search` to avoid loading it
 - **`data/` directory** is gitignored — contains the SQLite database and logs at runtime
 - **pytest-asyncio** with `asyncio_mode = "auto"` — async test functions work without the `@pytest.mark.asyncio` decorator

@@ -1,6 +1,6 @@
 # Design Decisions
 
-This document records the reasoning behind key architectural choices in Luna Agent.
+This document records the reasoning behind key architectural choices in Mose Agent.
 
 ## Custom Build Over Frameworks
 
@@ -66,7 +66,7 @@ This is the "don't build it, don't block it" principle.
 
 **Recency decay:** Memories lose relevance over time. Exponential decay with a 7-day half-life means a week-old memory scores half as much as a fresh one. Configurable in `config.toml`.
 
-**Importance scoring:** The LLM assigns importance (1-10) when extracting facts. A score of 10 ("user's name is Fabio") always surfaces; a score of 2 ("the weather was nice") fades quickly.
+**Importance scoring:** The LLM assigns importance (1-10) when extracting facts. A score of 10 ("user's name is Mose") always surfaces; a score of 2 ("the weather was nice") fades quickly.
 
 ## nomic-embed-text-v1.5 for Embeddings
 

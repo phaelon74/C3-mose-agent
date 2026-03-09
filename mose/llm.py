@@ -10,8 +10,8 @@ from typing import Any
 
 import openai
 
-from luna.config import LLMConfig
-from luna.observe import get_logger, log_event, log_duration
+from mose.config import LLMConfig
+from mose.observe import get_logger, log_event, log_duration
 
 logger = get_logger("llm")
 
@@ -280,7 +280,7 @@ class BedrockClient:
         except ImportError:
             raise ImportError(
                 "boto3 is required for the Bedrock backend. "
-                "Install it with: pip install luna-agent[cloud]"
+                "Install it with: pip install mose-agent[cloud]"
             )
         region = _parse_bedrock_region(config.endpoint)
         kwargs: dict[str, Any] = {}

@@ -1,11 +1,17 @@
 [llm]
 endpoint = "http://localhost:8001/v1"
-model = "worker-agent"
+model = "QuantTrio/Qwen3.5-27B-AWQ"
 max_tokens = 16384
-temperature = 0.7
+temperature = 1.0
+context_window = 98304
 
 [discord]
 # token loaded from DISCORD_TOKEN env var
+
+[signal]
+# phone_number loaded from SIGNAL_PHONE env var
+daemon_host = "127.0.0.1"
+daemon_port = 7583
 
 [memory]
 db_path = "data/memory.db"
@@ -13,7 +19,7 @@ embedding_model = "nomic-ai/nomic-embed-text-v1.5"
 embedding_dimensions = 384
 top_k = 10
 chunk_size = 500
-summary_interval = 50
+summary_interval = 8
 rrf_k = 60
 importance_threshold = 3.0
 recency_weight = 0.3
@@ -21,6 +27,8 @@ recency_weight = 0.3
 [agent]
 workspace = "data/workspace"
 allow_read_outside = true
+skills_path = "skills"
+recent_messages_limit = 15
 
 [observe]
 log_dir = "data/logs"

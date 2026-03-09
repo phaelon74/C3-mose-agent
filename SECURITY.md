@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities through [GitHub's private vulnerability reporting](https://github.com/nonatofabio/luna-agent/security/advisories/new).
+Please report security vulnerabilities through [GitHub's private vulnerability reporting](https://github.com/phaelon74/C3-luna-agent/security/advisories/new).
 
 **Do not** open a public issue for security vulnerabilities.
 

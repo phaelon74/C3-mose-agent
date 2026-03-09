@@ -10,7 +10,7 @@ import pytest
 
 from unittest.mock import AsyncMock, MagicMock
 
-from luna.tools import (
+from mose.tools import (
     NATIVE_TOOLS,
     _check_blocked,
     _check_write_allowed,
@@ -18,12 +18,13 @@ from luna.tools import (
     _DELEGATE_ALLOWED_TOOLS,
     _get_delegate_tools,
     call_native_tool,
+    init_approval,
     init_workspace,
     init_tool_registry,
     is_native_tool,
     verify_tool_result,
 )
-from luna.llm import LLMResponse, ToolCall
+from mose.llm import LLMResponse, ToolCall
 from pathlib import Path
 
 
@@ -40,7 +41,7 @@ class TestToolRegistry:
     def test_all_tools_registered(self):
         names = {t["function"]["name"] for t in NATIVE_TOOLS}
         assert names == {
-            "bash", "read_file", "write_file", "list_directory",
+            "bash", "sre_execute", "read_file", "write_file", "list_directory",
             "web_fetch", "web_search", "list_available_tools", "use_tool",
             "summarize_paper", "delegate", "code_task",
         }
@@ -116,6 +117,58 @@ class TestBlockedPatterns:
         assert _check_blocked("echo hello") is None
         assert _check_blocked("rm -rf ./build") is None
         assert _check_blocked("cat /etc/hostname") is None
+
+
+class TestSreExecute:
+    @pytest.fixture(autouse=True)
+    def reset_approval(self):
+        init_approval(None)
+        yield
+        init_approval(None)
+
+    @pytest.mark.asyncio
+    async def test_no_callback_denied(self):
+        result = await call_native_tool(
+            "sre_execute",
+            {"command": "echo hi", "reason": "test", "target_system": "linux"},
+        )
+        assert "denied" in result.lower()
+        assert "hi" not in result
+
+    @pytest.mark.asyncio
+    async def test_callback_denied(self):
+        init_approval(lambda c, r, t: False)
+        result = await call_native_tool(
+            "sre_execute",
+            {"command": "echo hi", "reason": "test", "target_system": "linux"},
+        )
+        assert "denied" in result.lower()
+        assert "hi" not in result
+
+    @pytest.mark.asyncio
+    async def test_callback_approved_executes(self):
+        init_approval(lambda c, r, t: True)
+        result = await call_native_tool(
+            "sre_execute",
+            {"command": "echo approved", "reason": "test", "target_system": "linux"},
+        )
+        assert "approved" in result
+        assert "denied" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_args(self):
+        result = await call_native_tool("sre_execute", {"command": "echo hi"})
+        assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_blocked_command(self):
+        init_approval(lambda c, r, t: True)
+        result = await call_native_tool(
+            "sre_execute",
+            {"command": "rm -rf /", "reason": "test", "target_system": "linux"},
+        )
+        assert "Blocked" in result
+        assert "denied" not in result.lower()
 
 
 class TestReadFile:
