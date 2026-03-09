@@ -1,5 +1,5 @@
 [Unit]
-Description=Worker Agent - Qwen3.5-27B-AWQ SGLang (4x RTX 3060)
+Description=Worker Agent - Qwen3.5-27B-AWQ vLLM (4x RTX 3060)
 After=network-online.target
 
 [Service]
@@ -7,15 +7,16 @@ Type=simple
 User=Mose
 WorkingDirectory=/home/Mose/mose-agent
 Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
-ExecStart=/home/Mose/mose-agent/.venv/bin/python -m sglang.launch_server \
-  --model-path QuantTrio/Qwen3.5-27B-AWQ \
+ExecStart=/home/Mose/mose-agent/.venv/bin/vllm serve QuantTrio/Qwen3.5-27B-AWQ \
+  --tensor-parallel-size 4 \
   --port 8001 \
-  --tp-size 4 \
-  --mem-fraction-static 0.85 \
-  --context-length 98304 \
+  --host 0.0.0.0 \
+  --max-model-len 98304 \
+  --gpu-memory-utilization 0.85 \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
-  --host 0.0.0.0
+  --enable-auto-tool-choice \
+  -O '{"cudagraph_capture_sizes": [1, 2, 4, 8]}'
 Restart=always
 RestartSec=10
 

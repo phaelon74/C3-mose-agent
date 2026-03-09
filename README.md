@@ -49,19 +49,18 @@ Discord (discord.py)     CLI REPL (no token)
 +---------------------------------+
               |
               v
-        llama-server               Qwen3.5-35B-A3B on 2x RTX 3090
+        vLLM                      Qwen3.5-27B-AWQ on 4x RTX 3060
 ```
 
-All LLM traffic flows through a single `LLMClient` with a configurable endpoint URL. Today it points at `localhost:8001` (llama-server). To insert an AI firewall later, change the URL to `localhost:9000` — zero code changes required.
+All LLM traffic flows through a single `LLMClient` with a configurable endpoint URL. Today it points at `localhost:8001` (vLLM). To insert an AI firewall later, change the URL to `localhost:9000` — zero code changes required.
 
 **Thinking model support:** Mose handles reasoning models (Qwen3.5, etc.) automatically — extracting `reasoning_content`, falling back to cleaned reasoning when content is empty, and stripping leaked markup (`<thinking>`, `<tool_call>`, etc.) from output.
 
 ## Hardware
 
-- Intel i7-13700K, 64GB DDR4
-- 2x NVIDIA RTX 3090 (24GB each, 48GB total)
-- Qwen3.5-35B-A3B Q8_0 via llama-server with layer split across both GPUs
-- 131K context window, Q8_0 KV cache
+- 4x NVIDIA RTX 3060 (12GB each, 48GB total)
+- Qwen3.5-27B-AWQ via vLLM with tensor parallelism across 4 GPUs
+- 98K context window, AWQ 4-bit quantization
 
 ## Quick Start
 
@@ -106,7 +105,7 @@ mose-agent/
 │   ├── test_tools.py        # Native tool tests
 │   └── test_tool_output.py  # Output pipeline tests
 ├── mose-agent.service        # systemd unit for the agent
-├── worker-agent.service      # systemd unit for llama-server (Qwen3.5-35B-A3B)
+├── worker-agent.service      # systemd unit for vLLM (Qwen3.5-27B-AWQ)
 └── data/                     # Created at runtime
     ├── memory.db             # SQLite database
     ├── logs/                 # JSON log files
@@ -294,7 +293,7 @@ sudo cp mose-agent.service /etc/systemd/system/
 sudo cp worker-agent.service /etc/systemd/system/
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now worker-agent    # Start LLM server (Qwen3.5-35B-A3B) first
+sudo systemctl enable --now worker-agent    # Start LLM server (Qwen3.5-27B-AWQ) first
 sudo systemctl enable --now mose-agent      # Then the agent (depends on worker-agent)
 ```
 
