@@ -7,16 +7,17 @@ Type=simple
 User=Mose
 WorkingDirectory=/home/Mose/mose-agent
 Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
-ExecStart=/home/Mose/mose-agent/.venv/bin/vllm serve QuantTrio/Qwen3.5-27B-AWQ \
+ExecStart=/home/Mose/mose-agent/.venv/bin/vllm serve /home/Mose/QuantTrio/Qwen3.5-27B-AWQ \
   --tensor-parallel-size 4 \
   --port 8001 \
   --host 0.0.0.0 \
-  --max-model-len 98304 \
-  --gpu-memory-utilization 0.85 \
+  --max-model-len 65536 \
+  --gpu-memory-utilization 0.90 \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --enable-auto-tool-choice \
-  -O '{"cudagraph_capture_sizes": [1, 2, 4, 8]}'
+  --trust-remote-code \
+  --compilation-config.cudagraph_capture_sizes [1,2,4,8]
 Restart=always
 RestartSec=10
 
