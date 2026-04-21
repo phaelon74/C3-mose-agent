@@ -105,8 +105,53 @@ export DOCKER_GID=$(getent group docker | cut -d: -f3)
 docker compose build --build-arg DOCKER_GID=$DOCKER_GID
 ```
 
-Add `DOCKER_GID` to your shell profile (or a `.env` loaded by your shell)
-so future `docker compose build` commands pick it up automatically.
+**Persist it so you do not have to export every session.** Pick one approach
+(both work with `docker compose build`; Compose substitutes `${DOCKER_GID}`
+from the environment or from the project `.env` file).
+
+**Option 1 — project `.env` (recommended):** Docker Compose automatically
+reads a file named `.env` in the same directory as `docker-compose.yml` for
+variable interpolation. You already created `.env` in A.3; append the numeric
+GID once (replace nothing — the command fills in the current value):
+
+```bash
+echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+```
+
+Verify the line looks like `DOCKER_GID=991` (your number will differ). After
+that, plain `docker compose build` passes the correct build arg. If the host
+`docker` group is ever recreated with a new GID, update this line and rebuild.
+
+**Option 2 — shell profile:** If you prefer an environment variable in every
+interactive shell, append one line to your shell’s rc file, then open a new
+shell or reload the file (`source ~/.bashrc`, `exec fish`, etc.).
+
+Bash (`~/.bashrc` or `~/.profile`) or Zsh (`~/.zshrc`):
+
+```bash
+grep -q 'DOCKER_GID' ~/.bashrc || echo 'export DOCKER_GID=$(getent group docker | cut -d: -f3)' >> ~/.bashrc
+```
+
+Adjust the path if you use Zsh (`~/.zshrc`) instead of Bash.
+
+Fish (`~/.config/fish/config.fish`): add this line (Fish uses parentheses for
+command substitution, not `$()`):
+
+```fish
+set -gx DOCKER_GID (getent group docker | cut -d: -f3)
+```
+
+Append it once, for example:
+
+```bash
+mkdir -p ~/.config/fish
+grep -q 'set -gx DOCKER_GID' ~/.config/fish/config.fish 2>/dev/null || \
+  echo 'set -gx DOCKER_GID (getent group docker | cut -d: -f3)' >> ~/.config/fish/config.fish
+```
+
+**Not sufficient:** A random `.env` somewhere on disk is ignored unless you
+`export` its variables yourself or place the values in the **repository**
+`.env` as in option 1. `docker compose` does not read `~/.env` by default.
 
 ### A.5 Launch the sandbox and the agent
 
