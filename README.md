@@ -125,7 +125,8 @@ secrets and paths:
 | `LLM_ENDPOINT` | OpenAI-compatible API base URL (e.g. `http://localhost:5000/v1`) | No |
 | `LLM_MODEL` | Model id passed to the API | No |
 | `LLM_MAX_TOKENS` | Max completion tokens | No |
-| `LLM_TEMPERATURE` | Sampling temperature | No |
+| `LLM_TEMPERATURE` | Sampling temperature (ignored if `LLM_OMIT_TEMPERATURE` is true) | No |
+| `LLM_OMIT_TEMPERATURE` | If `true` / `1`, do not send `temperature` on API requests (use server default) | No |
 | `LLM_CONTEXT_WINDOW` | Context length hint for the agent | No |
 | `LLM_API_KEY` | Bearer token if the server requires auth | No |
 | `LLM_PROVIDER` | `openai_compat`, `tabby`, `vllm`, or `bedrock` | No |

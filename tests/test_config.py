@@ -39,6 +39,15 @@ def test_llm_temperature_zero_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert cfg.llm.temperature == 0.0
 
 
+def test_llm_omit_temperature_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing = tmp_path / "no_config.toml"
+    monkeypatch.setenv("LLM_OMIT_TEMPERATURE", "true")
+
+    cfg = load_config(missing)
+
+    assert cfg.llm.omit_temperature is True
+
+
 def test_llm_env_empty_string_skips_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Blank env must not crash int()/float() and must not override TOML."""
     cfg_path = tmp_path / "config.toml"

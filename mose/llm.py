@@ -79,8 +79,11 @@ class LLMClient:
             "model": self.config.model,
             "messages": messages,
             "max_completion_tokens": self.config.max_tokens,
-            "temperature": temperature if temperature is not None else self.config.temperature,
         }
+        if not self.config.omit_temperature:
+            kwargs["temperature"] = (
+                temperature if temperature is not None else self.config.temperature
+            )
         if tools:
             kwargs["tools"] = tools
 
@@ -310,11 +313,12 @@ class BedrockClient:
         if tools:
             kwargs["toolConfig"] = {"tools": _openai_tools_to_bedrock(tools)}
 
-        temp = temperature if temperature is not None else self.config.temperature
-        kwargs["inferenceConfig"] = {
-            "maxTokens": self.config.max_tokens,
-            "temperature": temp,
-        }
+        inference_cfg: dict[str, Any] = {"maxTokens": self.config.max_tokens}
+        if not self.config.omit_temperature:
+            inference_cfg["temperature"] = (
+                temperature if temperature is not None else self.config.temperature
+            )
+        kwargs["inferenceConfig"] = inference_cfg
 
         tool_names = [t["function"]["name"] for t in (tools or [])]
 

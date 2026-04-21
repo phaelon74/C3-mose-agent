@@ -103,3 +103,37 @@ class TestTemperatureOverride:
 
         call_kwargs = client.client.chat.completions.create.call_args[1]
         assert call_kwargs["temperature"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_omit_temperature_skips_kwarg(self):
+        config = LLMConfig(
+            endpoint="http://localhost:8001/v1",
+            model="test",
+            temperature=0.7,
+            omit_temperature=True,
+        )
+        client = LLMClient(config)
+        mock_response = self._mock_openai_response()
+        client.client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        await client.chat([{"role": "user", "content": "hi"}], temperature=0.2)
+
+        call_kwargs = client.client.chat.completions.create.call_args[1]
+        assert "temperature" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_omit_temperature_false_still_sends(self):
+        config = LLMConfig(
+            endpoint="http://localhost:8001/v1",
+            model="test",
+            temperature=0.55,
+            omit_temperature=False,
+        )
+        client = LLMClient(config)
+        mock_response = self._mock_openai_response()
+        client.client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        call_kwargs = client.client.chat.completions.create.call_args[1]
+        assert call_kwargs["temperature"] == 0.55

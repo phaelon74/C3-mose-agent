@@ -57,7 +57,7 @@ Three tables: `memories` (long-term facts), `messages` (conversation history per
 
 **`observe.py`** — Structured JSON logging (`data/logs/mose-YYYY-MM-DD.jsonl`). All components use `log_event()` for structured data and `log_duration()` context manager for latency tracking.
 
-**`config.py`** — Loads `config.toml` with env var overrides. LLM options use `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`; also `DISCORD_TOKEN`, `SIGNAL_*`, `MEMORY_DB_PATH`, `LOG_DIR`. All config sections are dataclasses.
+**`config.py`** — Loads `config.toml` with env var overrides. LLM options use `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_OMIT_TEMPERATURE`, `LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`; also `DISCORD_TOKEN`, `SIGNAL_*`, `MEMORY_DB_PATH`, `LOG_DIR`. All config sections are dataclasses.
 
 ## Key Design Decisions
 

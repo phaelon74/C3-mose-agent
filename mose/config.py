@@ -14,6 +14,21 @@ except ModuleNotFoundError:
 _ROOT = Path(__file__).resolve().parent.parent
 
 
+def _env_optional_bool(name: str) -> bool | None:
+    """Parse optional env as bool; None if unset or blank; None if unrecognized."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.lower() in ("1", "true", "yes", "on"):
+        return True
+    if s.lower() in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 @dataclass
 class LLMConfig:
     endpoint: str = "http://localhost:8001/v1"
@@ -21,6 +36,8 @@ class LLMConfig:
     max_tokens: int = 16384
     temperature: float = 1.0
     context_window: int = 98304
+    # When True, chat requests omit the temperature field entirely (server default).
+    omit_temperature: bool = False
     # TabbyAPI and many OpenAI-compatible servers require Bearer auth; empty = no key (local vLLM).
     api_key: str = ""
     provider: str = "openai_compat"  # openai_compat | tabby | vllm | bedrock
@@ -186,6 +203,8 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.api_key = api_key
     if provider := os.environ.get("LLM_PROVIDER"):
         cfg.llm.provider = provider
+    if (omit_temp := _env_optional_bool("LLM_OMIT_TEMPERATURE")) is not None:
+        cfg.llm.omit_temperature = omit_temp
 
     # Resolve relative paths against project root
     if not Path(cfg.memory.db_path).is_absolute():

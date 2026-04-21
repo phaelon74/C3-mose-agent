@@ -77,6 +77,7 @@ LLM_ENDPOINT=http://host.docker.internal:5000/v1
 LLM_MODEL=your-served-model-name
 LLM_MAX_TOKENS=16384
 LLM_TEMPERATURE=1.0
+LLM_OMIT_TEMPERATURE=false   # true = never send temperature (engine default)
 LLM_CONTEXT_WINDOW=98304
 LLM_API_KEY=your-tabby-or-vllm-bearer-token   # empty string allowed for local vLLM
 LLM_PROVIDER=openai_compat   # openai_compat | tabby | vllm | bedrock
@@ -291,7 +292,7 @@ build_grace_window_seconds = 900         # 15 minutes
 Environment variables that override the file:
 `DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ADMIN`,
 `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`,
-`LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`,
+`LLM_OMIT_TEMPERATURE`, `LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`,
 `MEMORY_DB_PATH`, `LOG_DIR`, `TERMINAL_BACKEND`.
 
 ---
