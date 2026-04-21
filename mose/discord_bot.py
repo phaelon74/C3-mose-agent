@@ -131,6 +131,11 @@ def _format_status(tool_name: str, arguments: str) -> str:
         if mcp_name and use_tool_needs_approval(mcp_name):
             return f"\U0001f527 Using {mcp_name} (approval required)"
         return f"\U0001f527 Using {args.get('name', arguments)}"
+    if "__" in tool_name:
+        label = tool_name if len(tool_name) <= 80 else tool_name[:77] + "..."
+        if use_tool_needs_approval(tool_name):
+            return f"\U0001f527 Using {label} (approval required)"
+        return f"\U0001f527 Using {label}"
     return f"\u2699\ufe0f {tool_name}..."
 
 

@@ -539,8 +539,19 @@ per-service URLs in `.env`.
 run immediately. Every other tool on those servers requires the **same human approval**
 flow as `sre_execute` (Signal **admin** group with `SIGNAL_ADMIN_GROUP_ID`, 60 second
 timeout). If no approval callback is configured (e.g. half-configured CLI), mutating
-`use_tool` calls are **denied**. Other MCP servers (e.g. `paper_db`) are not gated by
-this policy.
+MCP calls (whether invoked as `server__tool` directly or via `use_tool`) are **denied**.
+Other MCP servers (e.g. `paper_db`) are not gated by this policy.
+
+**Inlining MCP tools:** With `inline_mcp_tools = true` in `[agent]` in `config.toml`
+(default on), every connected MCP tool is merged into the main LLM tool list as
+`server__tool` functions — **prefer those** over `bash`/`curl` to Plex, Sonarr, or
+Radarr (credentials live only in the MCP sidecars). Set `inline_mcp_tools = false`
+to hide MCP tools from that list and rely on `list_available_tools` / `use_tool`
+only. Optional `inline_mcp_servers = ["plex-ops-admin", "plex-stack-automation"]`
+limits which MCP servers are inlined (omit or leave empty for all). If the merged
+tool count exceeds `inline_mcp_tools_soft_cap`, the agent logs `tool_list_over_cap`
+once per chat session — raise the cap or narrow `inline_mcp_servers` if your LLM
+backend struggles with large tool payloads.
 
 **Which server when:** [vladimir-tutin/plex-mcp-server](https://github.com/vladimir-tutin/plex-mcp-server)
 (`plex-ops-admin`) covers broad Plex operations including playback and server maintenance.

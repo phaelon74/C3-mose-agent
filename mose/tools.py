@@ -790,19 +790,15 @@ async def _tool_list_available_tools(args: dict, **kwargs) -> str:
     return f"Available tools ({len(lines)}):\n" + "\n".join(lines)
 
 
-async def _tool_use_tool(args: dict, **kwargs) -> str:
-    name = args.get("name", "")
-    if not name:
-        return "Error: 'name' is required"
-
+async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> str:
+    """Run an MCP tool by ``server__tool`` name with read/write policy (shared with ``use_tool``)."""
     if _mcp_manager is None:
         return "Error: MCP not configured — no external tools available."
 
-    arguments = args.get("arguments", {})
-    if isinstance(arguments, str):
-        arguments = json.loads(arguments) if arguments else {}
+    if not isinstance(arguments, dict):
+        arguments = {}
 
-    full_name = str(name).strip()
+    full_name = str(full_name).strip()
     if "__" not in full_name:
         return (
             "Error: MCP tool name must use server__tool format "
@@ -849,6 +845,22 @@ async def _tool_use_tool(args: dict, **kwargs) -> str:
         log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
 
     return await _mcp_manager.call_tool(full_name, arguments)
+
+
+async def _tool_use_tool(args: dict, **kwargs) -> str:
+    name = args.get("name", "")
+    if not name:
+        return "Error: 'name' is required"
+
+    if _mcp_manager is None:
+        return "Error: MCP not configured — no external tools available."
+
+    arguments = args.get("arguments", {})
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments) if arguments else {}
+
+    full_name = str(name).strip()
+    return await execute_mcp_tool(full_name, arguments)
 
 
 # --- Summarize paper (extract-then-summarize) ---

@@ -31,6 +31,11 @@ workspace = "data/workspace"
 allow_read_outside = true
 skills_path = "skills"
 recent_messages_limit = 15
+# Merge MCP tool schemas into the main LLM tool list (main agent only). See INSTALL.md §D.
+inline_mcp_tools = true
+# Restrict inlining to named MCP servers only, e.g. ["plex-ops-admin", "plex-stack-automation"].
+# inline_mcp_servers = []
+inline_mcp_tools_soft_cap = 80
 
 [terminal]
 # "local" for dev; "docker" when agent container uses docker.sock to exec into mose-sandbox

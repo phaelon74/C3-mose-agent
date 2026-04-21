@@ -114,6 +114,12 @@ class AgentConfig:
     allow_read_outside: bool = True
     skills_path: str = "skills"
     recent_messages_limit: int = 15
+    # Inline MCP tool schemas into the LLM tools array (main agent only).
+    inline_mcp_tools: bool = True
+    # If non-empty, only tools whose name starts with "<server>__" are inlined.
+    inline_mcp_servers: list[str] = field(default_factory=list)
+    # Log once per session when len(tools) exceeds this (soft cap; no hard trim).
+    inline_mcp_tools_soft_cap: int = 80
 
 
 @dataclass

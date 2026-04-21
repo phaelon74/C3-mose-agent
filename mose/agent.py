@@ -14,7 +14,13 @@ from mose.llm import LLMClient
 from mose.memory import MemoryManager
 from mose.mcp_manager import MCPManager
 from mose.observe import get_logger, log_event, log_duration
-from mose.tools import NATIVE_TOOLS, is_native_tool, call_native_tool, verify_tool_result
+from mose.tools import (
+    NATIVE_TOOLS,
+    call_native_tool,
+    execute_mcp_tool,
+    is_native_tool,
+    verify_tool_result,
+)
 
 logger = get_logger("agent")
 
@@ -86,6 +92,22 @@ def _truncate_messages_to_fit(messages: list[dict], max_input_tokens: int) -> li
             break
     return system_msgs + kept
 
+
+def _coerce_tool_arguments(raw: Any) -> dict[str, Any]:
+    """Normalize LLM tool-call arguments to a dict (OpenAI wire format uses JSON string)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return {}
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are Mose, an AI assistant running in Cloud3's Infrastructure. You are knowledgeable, precise, and concise. \
 You think step by step on complex problems but keep routine answers brief.
@@ -108,7 +130,11 @@ Use for multi-step research, complex file operations, or anything that benefits 
 - **code_task**: Delegate a coding task to a sub-agent that writes code, runs it, checks results, \
 and iterates on failures. Use for scripts, scrapers, automation, or any task requiring write-run-fix cycles. \
 Prefer this over delegate for coding work.
-- **list_available_tools / use_tool**: Discover and call additional MCP tools beyond the built-ins.
+- **Integrated backends (MCP)**: Tools named ``server__tool`` (for example ``plex-ops-admin__sessions_get_active``) \
+call Plex, Sonarr, Radarr, and other MCP backends. **Prefer these** for those systems. Do not use ``bash``/``curl`` \
+to reach those services — credentials and policy are not available in the shell.
+- **list_available_tools / use_tool**: When these appear in your tool list (MCP inlining disabled in config), \
+use them to discover or call MCP tools by name.
 
 ## Guidelines
 - Act, don't ask. You have tools — use them. Install packages, run commands, create files, scan networks. \
@@ -269,6 +295,44 @@ class Agent:
             ),
         )
         self._review_task: asyncio.Task[Any] | None = None
+        # Log tool_list_over_cap at most once per session_id.
+        self._tool_list_cap_logged_sessions: set[str] = set()
+
+    def _build_llm_tools(self, session_id: str) -> list[dict[str, Any]]:
+        """Native tools plus inlined MCP tools (local list; never mutates ``NATIVE_TOOLS``)."""
+        cfg = self.config.agent
+        llm_tools: list[dict[str, Any]] = list(NATIVE_TOOLS)
+        mcp_added = 0
+        if cfg.inline_mcp_tools and self.mcp.servers:
+            mcp_tools = self.mcp.get_all_tools()
+            allowed = [s.strip() for s in cfg.inline_mcp_servers if str(s).strip()]
+            if allowed:
+                allowed_set = frozenset(allowed)
+                filtered: list[dict[str, Any]] = []
+                for entry in mcp_tools:
+                    name = str(entry.get("function", {}).get("name", ""))
+                    if "__" not in name:
+                        continue
+                    server = name.split("__", 1)[0].strip()
+                    if server in allowed_set:
+                        filtered.append(entry)
+                mcp_tools = filtered
+            llm_tools.extend(mcp_tools)
+            mcp_added = len(mcp_tools)
+        if mcp_added > 0:
+            meta = frozenset({"list_available_tools", "use_tool"})
+            llm_tools = [t for t in llm_tools if t.get("function", {}).get("name") not in meta]
+        cap = cfg.inline_mcp_tools_soft_cap
+        if len(llm_tools) > cap and session_id not in self._tool_list_cap_logged_sessions:
+            self._tool_list_cap_logged_sessions.add(session_id)
+            log_event(
+                logger,
+                "tool_list_over_cap",
+                count=len(llm_tools),
+                cap=cap,
+                session_id=session_id,
+            )
+        return llm_tools
 
     async def process(
         self,
@@ -302,8 +366,8 @@ class Agent:
             session_id, limit=self.config.agent.recent_messages_limit
         )
 
-        # 4. Get available tools (native only; MCP tools accessed via meta-tools)
-        tools = NATIVE_TOOLS
+        # 4. Tools for the LLM: native builtins plus inlined MCP (see ``_build_llm_tools``).
+        tools = self._build_llm_tools(session_id)
 
         # 5. Build message list
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
@@ -337,6 +401,7 @@ class Agent:
             # Execute each tool call
             for tc in response.tool_calls:
                 log_event(logger, "tool_executing", tool=tc.name, session_id=session_id)
+                # Skill-learning heuristic: only *native* builtins count (not inlined MCP).
                 if is_native_tool(tc.name):
                     total_native_tool_calls += 1
 
@@ -355,7 +420,8 @@ class Agent:
                             context=message, llm=self.llm,
                         )
                     else:
-                        result = await self.mcp.call_tool(tc.name, tc.arguments)
+                        parsed = _coerce_tool_arguments(tc.arguments)
+                        result = await execute_mcp_tool(tc.name, parsed)
                 except Exception as e:
                     result = f"Tool error: {e}"
                     logger.exception(f"Tool call failed: {tc.name}")
