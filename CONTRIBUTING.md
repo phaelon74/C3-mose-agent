@@ -1,12 +1,12 @@
-# Contributing to Mose Agent
+﻿# Contributing to Mose Agent
 
 Thanks for your interest in contributing! Mose Agent is a small, focused project and we want to keep it that way.
 
 ## Development Setup
 
 ```bash
-git clone https://github.com/phaelon74/C3-luna-agent.git
-cd C3-luna-agent
+git clone https://github.com/phaelon74/C3-mose-agent.git
+cd C3-mose-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -47,7 +47,7 @@ See [DESIGN.md](DESIGN.md) for architectural decisions and rationale. New featur
 
 ## Reporting Bugs
 
-Use [GitHub Issues](https://github.com/phaelon74/C3-luna-agent/issues) with the bug report template.
+Use [GitHub Issues](https://github.com/phaelon74/C3-mose-agent/issues) with the bug report template.
 
 ## Security
 

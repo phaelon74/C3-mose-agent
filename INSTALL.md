@@ -1,4 +1,4 @@
-# Installation Guide
+﻿# Installation Guide
 
 Complete setup instructions for the Mose SRE/DevOps agent on a **Linux Docker
 host**. Windows hosts are intentionally not supported — the agent is developed
@@ -57,7 +57,7 @@ sudo -u mose -i            # switch to the mose user for the rest of this sectio
 
 ```bash
 cd ~
-git clone https://github.com/phaelon74/C3-luna-agent.git mose-agent
+git clone https://github.com/phaelon74/C3-mose-agent.git mose-agent
 cd mose-agent
 ```
 
@@ -160,7 +160,7 @@ human approval.
 ```bash
 sudo -u mose -i
 cd ~
-git clone https://github.com/phaelon74/C3-luna-agent.git mose-agent
+git clone https://github.com/phaelon74/C3-mose-agent.git mose-agent
 cd mose-agent
 ```
 

@@ -1,4 +1,4 @@
-<p align="center">
+﻿<p align="center">
   <img src="assets/logo.svg" alt="Mose Agent" width="120" height="120">
 </p>
 
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/phaelon74/C3-luna-agent/actions/workflows/tests.yml"><img src="https://github.com/phaelon74/C3-luna-agent/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/phaelon74/C3-mose-agent/actions/workflows/tests.yml"><img src="https://github.com/phaelon74/C3-mose-agent/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
 </p>
