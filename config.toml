@@ -11,7 +11,7 @@
 # phone_number: linked account (SIGNAL_PHONE) — signal-cli -a; not a chat destination.
 # engagement_group_id / admin_group_id: base64 group ids (SIGNAL_ENGAGEMENT_GROUP_ID,
 # SIGNAL_ADMIN_GROUP_ID). See INSTALL.md section E.
-daemon_host = "host.docker.internal"
+daemon_host = "172.17.0.1"
 daemon_port = 7583
 proposal_timeout_seconds = 43200   # 12 hours
 
