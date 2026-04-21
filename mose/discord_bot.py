@@ -10,6 +10,7 @@ from contextvars import ContextVar
 import discord
 
 from mose.agent import Agent
+from mose.mcp_write_policy import use_tool_needs_approval
 from mose.observe import get_logger, log_event
 
 logger = get_logger("discord")
@@ -35,7 +36,8 @@ async def _discord_approval_callback(command: str, reason: str, target_system: s
     if not all([channel, author, bot]):
         return False
 
-    embed = discord.Embed(title="SRE Execute Approval", description=reason, color=0x5865F2)
+    title = "MCP Tool Approval" if target_system.startswith("mcp:") else "SRE Execute Approval"
+    embed = discord.Embed(title=title, description=reason, color=0x5865F2)
     embed.add_field(name="System", value=target_system, inline=True)
     embed.add_field(name="Command", value=f"```\n{command[:1000]}\n```", inline=False)
     embed.set_footer(text="Reply with 'y', 'yes', or 'approve' within 60 seconds")
@@ -125,6 +127,9 @@ def _format_status(tool_name: str, arguments: str) -> str:
     if tool_name in ("delegate", "code_task"):
         return f"\U0001f916 Working: {args.get('task', arguments)}"
     if tool_name == "use_tool":
+        mcp_name = str(args.get("name", "")).strip()
+        if mcp_name and use_tool_needs_approval(mcp_name):
+            return f"\U0001f527 Using {mcp_name} (approval required)"
         return f"\U0001f527 Using {args.get('name', arguments)}"
     return f"\u2699\ufe0f {tool_name}..."
 

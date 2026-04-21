@@ -412,19 +412,140 @@ Environment variables that override the file:
 
 ---
 
-## D. MCP servers (optional)
+## D. MCP servers — Plex / Sonarr / Radarr (optional)
 
-MCP servers expose extra tools to the agent. Copy the example and edit:
+MCP servers expose extra tools to the agent. The LLM calls them only through
+native tools `list_available_tools` and `use_tool` (see `mose/agent.py`).
+
+### D.0 Registry file
 
 ```bash
 cp mcp_servers.example.json mcp_servers.json
 ```
 
-For no MCP servers, an empty config is fine:
+For no MCP servers at all, an empty config is fine:
 
 ```json
 { "servers": {} }
 ```
+
+If you use the Plex sidecars below, keep `mcp_servers.json` **free of secrets**:
+URLs and tokens live in the MCP container environment (`.env` → `docker-compose.yml`),
+and each image runs `/usr/local/bin/mcp-entrypoint`, which reads those variables.
+
+### D.1 Gather Plex credentials (`PLEX_URL`, `PLEX_TOKEN`)
+
+1. **`PLEX_URL`** — Full base URL including scheme, host, and port, for example
+   `http://10.4.251.10:32400`. No trailing path. Plex, Sonarr, and Radarr may each
+   live on **different IPs and ports**; set each URL independently.
+2. **`PLEX_TOKEN`**
+   - **Primary:** Plex Web → **Settings → Account** → enable **Show Advanced** →
+     copy **Plex Token**.
+   - **Alternate:** Open
+     `http://YOUR_PLEX_IP:32400/web/index.html#!/settings/account` while signed in,
+     or inspect a Plex Web request for the `X-Plex-Token` query parameter.
+3. **Permissions:** The token acts as that Plex user against the server (not a
+   fine-scoped OAuth scope). Prefer a **dedicated** Plex account for automation and
+   restrict library access under **Users & Sharing**. Keep the token in MCP env
+   only; rotate via **Sign out of all devices** if leaked.
+4. **Reachability check** (from the host, after `plex-ops-admin` is up; ensure
+   `PLEX_URL` / `PLEX_TOKEN` are exported in your shell or rely on values inside the container):
+
+```bash
+docker compose exec plex-ops-admin sh -lc \
+  'curl -sS -m 5 "${PLEX_URL}/identity?X-Plex-Token=${PLEX_TOKEN}" | head -c 200'
+```
+
+### D.2 Gather Sonarr credentials (`SONARR_URL`, `SONARR_API_KEY`)
+
+1. **`SONARR_URL`** — e.g. `http://10.4.251.11:8989`. Do **not** append `/api/v3`;
+   the MCP client adds API paths. Sonarr uses **API v3**.
+2. **`SONARR_API_KEY`** — Sonarr Web UI → **Settings → General** → **Security** →
+   **API Key** (enable **Show Advanced** if needed). Regenerate if unknown.
+3. **Permissions:** Sonarr exposes one **full-access** API key; read and write API
+   routes share it. Network isolation plus Mose’s `use_tool` approval policy (section D.6)
+   limit damage.
+4. **Check:**
+
+```bash
+docker compose exec plex-stack-automation sh -lc \
+  'curl -sS -m 10 -H "X-Api-Key: ${SONARR_API_KEY}" "${SONARR_URL}/api/v3/system/status"'
+```
+
+### D.3 Gather Radarr credentials (`RADARR_URL`, `RADARR_API_KEY`)
+
+Same pattern as Sonarr:
+
+1. **`RADARR_URL`** — e.g. `http://10.4.251.12:7878` (no `/api/v3` suffix).
+2. **`RADARR_API_KEY`** — **Settings → General → Security → API Key**.
+3. **Check:**
+
+```bash
+docker compose exec plex-stack-automation sh -lc \
+  'curl -sS -m 10 -H "X-Api-Key: ${RADARR_API_KEY}" "${RADARR_URL}/api/v3/system/status"'
+```
+
+Very large Radarr libraries (20k+ movies) may make the first `radarr_get_movies` MCP
+call take on the order of **30 seconds**; that is expected for niavasha’s server.
+
+### D.4 Optional Trakt (niavasha only)
+
+Create a Trakt OAuth application with redirect URI `urn:ietf:wg:oauth:2.0:oob`. Put
+`TRAKT_CLIENT_ID` and `TRAKT_CLIENT_SECRET` in `.env`. After bring-up, complete OAuth
+via MCP tools such as `trakt_authenticate`. Trakt sync / scrobble tools are treated as
+**writes** and require the same admin approval as other mutating MCP calls.
+
+### D.5 Map credentials to containers
+
+| Variable | `plex-ops-admin` | `plex-stack-automation` |
+|----------|------------------|-------------------------|
+| `PLEX_URL`, `PLEX_TOKEN` | yes | yes |
+| `SONARR_*`, `RADARR_*` | no | yes |
+| `TRAKT_*` | no | yes (optional) |
+
+Compose injects these from the project `.env` (chmod `600`, gitignored). **mose-agent**
+does not receive Plex/Sonarr/Radarr secrets; it only runs `docker exec -i` into the
+sidecars and speaks MCP over stdio.
+
+### D.6 Bring up MCP sidecars and networking
+
+Build and start the idle MCP containers on `mose-net` (no published ports — only
+other containers on the same compose network can reach them):
+
+```bash
+docker compose build plex-ops-admin plex-stack-automation
+docker compose up -d plex-ops-admin plex-stack-automation
+```
+
+Then start or restart the agent as usual (section A.5). The agent image includes the
+**docker CLI** so it can stdio-bridge into those containers using `mcp_servers.json`
+entries like the ones in `mcp_servers.example.json`. `mose-agent` declares
+`depends_on` for both sidecars, so `docker compose up -d mose-agent` will also
+bring them up first — their containers must exist before the agent initializes
+MCP or those tools will silently disappear until the next agent restart.
+
+**To disable the Plex MCP integration entirely:** comment out the
+`plex-ops-admin` and `plex-stack-automation` services **and** the two matching
+`depends_on` lines under `mose-agent:` in `docker-compose.yml`, and remove the
+same two entries from `mcp_servers.json`.
+
+**Routing:** MCP containers use the default bridge (`mose-net`). Outbound connections
+to each upstream IP on `10.4.251.0/24` are forwarded and SNATed by the Docker host,
+same model as section A.5.3. There is **no shared “media host”** assumption — only
+per-service URLs in `.env`.
+
+**Policy — reads vs writes:** For server names `plex-ops-admin` and
+`plex-stack-automation`, tools on the **read allowlist** in `mose/mcp_write_policy.py`
+run immediately. Every other tool on those servers requires the **same human approval**
+flow as `sre_execute` (Signal **admin** group with `SIGNAL_ADMIN_GROUP_ID`, 60 second
+timeout). If no approval callback is configured (e.g. half-configured CLI), mutating
+`use_tool` calls are **denied**. Other MCP servers (e.g. `paper_db`) are not gated by
+this policy.
+
+**Which server when:** [vladimir-tutin/plex-mcp-server](https://github.com/vladimir-tutin/plex-mcp-server)
+(`plex-ops-admin`) covers broad Plex operations including playback and server maintenance.
+[niavasha/plex-mcp-server](https://github.com/niavasha/plex-mcp-server)
+(`plex-stack-automation`) adds Sonarr/Radarr and analytics-style Plex tools.
 
 ---
 
@@ -626,6 +747,13 @@ agent's only outputs — an operator must review and action them.
 - **Sandboxed shell.** The `bash` tool is an **allowlist** (read-only,
   diagnostic commands only). Anything that changes state must go through
   `sre_execute`, which requires explicit human approval via Signal or CLI.
+- **Plex MCP sidecars.** For `plex-ops-admin` and `plex-stack-automation`, mutating
+  `use_tool` calls use the **same approval channel** as `sre_execute` (Signal admin
+  group when Signal is configured). Read-only tools on the allowlist in
+  `mose/mcp_write_policy.py` run without a prompt. Unknown tools default to **deny
+  until approved**. The agent container mounts the Docker socket to run
+  `docker exec -i` into the MCP sidecars — the same privilege model as shell
+  sandboxing; do not publish MCP service ports.
 - **Command policy.** `mose/bash_policy.py` centralises both the allowlist
   and the "always blocked" denylist (`rm -rf /`, `mkfs`, etc.) as a defense
   in depth layer on top of `sre_execute`.
@@ -653,6 +781,9 @@ agent's only outputs — an operator must review and action them.
 | Signal bot won't connect | `signal-cli-daemon` down or not linked | `systemctl status signal-cli-daemon`; re-link if needed |
 | Skill proposals never arrive on Signal | Group ids wrong or bot not in admin group | Set `SIGNAL_ADMIN_GROUP_ID`, add the linked device to that group, restart the agent |
 | Skill review timer never fires | Timer not enabled | `sudo systemctl enable --now mose-skill-review.timer && systemctl list-timers 'mose-*'` |
+| Mutating Plex MCP `use_tool` always denied | No approval callback (CLI / missing Signal admin) | Configure `SIGNAL_ADMIN_GROUP_ID` and run with Signal (section E), or use CLI / Discord where approval is wired |
+| Admin never sees MCP approval prompt | Wrong admin group id or linked device not in admin group | Fix `SIGNAL_ADMIN_GROUP_ID`, add the linked device to the admin group, restart the agent |
+| `docker exec` MCP connection fails | Sidecars not running or wrong container name in `mcp_servers.json` | `docker compose ps`; names must match `mose-plex-ops-admin` / `mose-plex-stack-automation` |
 
 ---
 
@@ -668,6 +799,8 @@ agent's only outputs — an operator must review and action them.
 ├── pyproject.toml                      # Python package definition
 ├── uv.lock                             # Pinned dependency versions (committed)
 ├── docker-compose.yml                  # Docker Compose deployment
+├── docker/plex-mcp-ops-admin/          # vladimir-tutin Plex MCP sidecar image
+├── docker/plex-mcp-stack-automation/   # niavasha Plex+ARR MCP sidecar image
 ├── Dockerfile                          # Agent image (non-root, docker GID aware)
 ├── mose-agent.service                  # systemd unit — the agent
 ├── mose-skill-review.service           # systemd unit — one-shot skill review

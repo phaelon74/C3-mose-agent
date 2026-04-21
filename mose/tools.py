@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mose.bash_policy import bash_rejection_message, is_bash_allowlisted, is_dangerous_command
+from mose.mcp_write_policy import classify_mcp_tool
 from mose.observe import get_logger, log_event
 from mose.tool_output import LLMExtractor, process_large_output
 
@@ -801,7 +802,53 @@ async def _tool_use_tool(args: dict, **kwargs) -> str:
     if isinstance(arguments, str):
         arguments = json.loads(arguments) if arguments else {}
 
-    return await _mcp_manager.call_tool(name, arguments)
+    full_name = str(name).strip()
+    if "__" not in full_name:
+        return (
+            "Error: MCP tool name must use server__tool format "
+            "(e.g. plex-ops-admin__library_list)."
+        )
+    server, bare_tool = full_name.split("__", 1)
+    server = server.strip()
+    bare_tool = bare_tool.strip()
+    if not server or not bare_tool:
+        return "Error: invalid MCP tool name (empty server or tool segment)."
+    policy = classify_mcp_tool(server, bare_tool)
+    if policy != "read":
+        if _approval_callback is None:
+            log_event(
+                logger,
+                "use_tool_denied",
+                reason="no_approval_callback",
+                tool=full_name,
+            )
+            return (
+                "Execution denied: no approval callback configured. "
+                "Mutating MCP tools require human approval — configure Signal "
+                "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled."
+            )
+        arg_str = json.dumps(arguments, default=str)
+        if len(arg_str) > 500:
+            arg_str = arg_str[:497] + "..."
+        command = f"{full_name}({arg_str})"
+        reason = "MCP tool not on read allowlist (default-deny for protected servers)"
+        target_system = f"mcp:{server}"
+        result = _approval_callback(command, reason, target_system)
+        if asyncio.iscoroutine(result):
+            approved = await result
+        else:
+            approved = bool(result)
+        if not approved:
+            log_event(
+                logger,
+                "use_tool_denied",
+                reason="operator_denied",
+                tool=full_name,
+            )
+            return "Execution denied by operator."
+        log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
+
+    return await _mcp_manager.call_tool(full_name, arguments)
 
 
 # --- Summarize paper (extract-then-summarize) ---

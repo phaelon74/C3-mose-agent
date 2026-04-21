@@ -4,6 +4,26 @@
       "command": ".venv/bin/python",
       "args": ["data/workspace/paper_db/paper_db_server.py"],
       "transport": "stdio"
+    },
+    "plex-ops-admin": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-plex-ops-admin",
+        "/usr/local/bin/mcp-entrypoint"
+      ],
+      "transport": "stdio"
+    },
+    "plex-stack-automation": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-plex-stack-automation",
+        "/usr/local/bin/mcp-entrypoint"
+      ],
+      "transport": "stdio"
     }
   }
 }

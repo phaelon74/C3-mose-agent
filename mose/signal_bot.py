@@ -10,6 +10,7 @@ from typing import Any
 
 from mose.agent import Agent
 from mose.config import SignalConfig
+from mose.mcp_write_policy import use_tool_needs_approval
 from mose.observe import get_logger, log_event
 
 logger = get_logger("signal")
@@ -335,8 +336,9 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
     if not admin_gid:
         return False
 
+    title = "MCP Tool Approval" if target_system.startswith("mcp:") else "SRE Execute Approval"
     prompt = (
-        f"SRE Execute Approval\n\n"
+        f"{title}\n\n"
         f"System: {target_system}\n"
         f"Reason: {reason}\n"
         f"Command: {command[:500]}{'...' if len(command) > 500 else ''}\n\n"
@@ -435,6 +437,9 @@ def _format_status(tool_name: str, arguments: str) -> str:
     if tool_name in ("delegate", "code_task"):
         return f"Working: {args.get('task', arguments)}"
     if tool_name == "use_tool":
+        mcp_name = str(args.get("name", "")).strip()
+        if mcp_name and use_tool_needs_approval(mcp_name):
+            return f"Using {mcp_name} (approval required)"
         return f"Using {args.get('name', arguments)}"
     return f"{tool_name}..."
 

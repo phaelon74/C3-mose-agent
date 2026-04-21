@@ -425,10 +425,19 @@ class TestUseTool:
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_error(self):
         mcp = _make_mock_mcp()
-        mcp.call_tool = AsyncMock(return_value="Error: Unknown tool 'nope'")
+        mcp.call_tool = AsyncMock(return_value="Error: Unknown tool 'srv__nope'")
+        init_tool_registry(mcp)
+        result = await call_native_tool("use_tool", {"name": "srv__nope", "arguments": {}})
+        assert "Error" in result
+
+    @pytest.mark.asyncio
+    async def test_malformed_name_requires_server_tool_separator(self):
+        mcp = _make_mock_mcp()
         init_tool_registry(mcp)
         result = await call_native_tool("use_tool", {"name": "nope", "arguments": {}})
         assert "Error" in result
+        assert "server__tool" in result
+        mcp.call_tool.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_missing_name(self):
@@ -453,6 +462,101 @@ class TestUseTool:
         init_tool_registry(mcp)
         await call_native_tool("use_tool", {"name": "srv__ping"})
         mcp.call_tool.assert_awaited_once_with("srv__ping", {})
+
+
+class TestUseToolMcpApproval:
+    """Protected Plex MCP servers require approval for non-readlisted tools."""
+
+    @pytest.fixture(autouse=True)
+    def reset_approval(self):
+        init_approval(None)
+        yield
+        init_approval(None)
+
+    @pytest.mark.asyncio
+    async def test_readlisted_plex_tool_no_approval_no_callback(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-ops-admin__library_list", "description": "List libs"}]
+        )
+        init_tool_registry(mcp)
+        result = await call_native_tool(
+            "use_tool",
+            {"name": "plex-ops-admin__library_list", "arguments": {}},
+        )
+        assert result == "tool result"
+        mcp.call_tool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_write_plex_tool_denied_without_callback(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-ops-admin__library_scan", "description": "Scan"}]
+        )
+        init_tool_registry(mcp)
+        result = await call_native_tool(
+            "use_tool",
+            {"name": "plex-ops-admin__library_scan", "arguments": {"library_name": "TV"}},
+        )
+        assert "denied" in result.lower()
+        assert "approval" in result.lower()
+        mcp.call_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_write_plex_tool_approved_calls_mcp(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-ops-admin__library_scan", "description": "Scan"}]
+        )
+        init_tool_registry(mcp)
+        init_approval(lambda c, r, t: True)
+        result = await call_native_tool(
+            "use_tool",
+            {"name": "plex-ops-admin__library_scan", "arguments": {}},
+        )
+        assert result == "tool result"
+        mcp.call_tool.assert_awaited_once_with("plex-ops-admin__library_scan", {})
+
+    @pytest.mark.asyncio
+    async def test_write_plex_tool_denied_when_operator_rejects(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-stack-automation__sonarr_add_series", "description": "Add"}]
+        )
+        init_tool_registry(mcp)
+        init_approval(lambda c, r, t: False)
+        result = await call_native_tool(
+            "use_tool",
+            {"name": "plex-stack-automation__sonarr_add_series", "arguments": {"x": 1}},
+        )
+        assert "denied" in result.lower()
+        mcp.call_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_on_protected_server_requires_approval(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-ops-admin__brand_new_upstream_tool", "description": "New"}]
+        )
+        init_tool_registry(mcp)
+        init_approval(lambda c, r, t: True)
+        await call_native_tool(
+            "use_tool",
+            {"name": "plex-ops-admin__brand_new_upstream_tool", "arguments": {}},
+        )
+        mcp.call_tool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_async_approval_callback(self):
+        mcp = _make_mock_mcp(
+            [{"name": "plex-ops-admin__library_refresh", "description": "Refresh"}]
+        )
+        init_tool_registry(mcp)
+
+        async def approve(_c, _r, _t):
+            return True
+
+        init_approval(approve)
+        result = await call_native_tool(
+            "use_tool",
+            {"name": "plex-ops-admin__library_refresh", "arguments": {}},
+        )
+        assert result == "tool result"
 
 
 class TestDelegateTool:

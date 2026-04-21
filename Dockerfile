@@ -11,18 +11,20 @@
 # Without this the non-root user would need to run as root to read the socket,
 # which defeats the purpose. Use a socket proxy for stricter deployments.
 
+# Client-only docker binary for `docker exec -i` MCP stdio bridge (see INSTALL.md D).
+FROM docker:26-cli AS dockercli
+
 FROM python:3.11-slim-bookworm
 
 ARG DOCKER_GID=999
 ARG APP_UID=1000
 ARG APP_GID=1000
 
-# docker CLI is handy for debugging but NOT used at runtime (the Python
-# docker SDK talks to the socket directly). Keep the image small; drop the
-# next line if you do not want the CLI at all.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /app
 COPY . .
