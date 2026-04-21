@@ -6,10 +6,10 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from mose.bash_policy import bash_rejection_message, is_bash_allowlisted, is_dangerous_command
 from mose.observe import get_logger, log_event
 from mose.tool_output import LLMExtractor, process_large_output
 
@@ -68,6 +68,9 @@ _mcp_manager: "MCPManager | None" = None
 # Approval callback for sre_execute — set by init_approval() at startup
 _approval_callback: "Callable[[str, str, str], Any] | None" = None
 
+# Skills root (for load_skill) — set by init_skills() at startup
+_skills_dir: Path | None = None
+
 
 def init_tool_registry(mcp: "MCPManager") -> None:
     """Register the MCP manager so meta-tools can discover and call MCP tools."""
@@ -79,6 +82,20 @@ def init_approval(callback: Callable[[str, str, str], Any] | None) -> None:
     """Register the approval callback for sre_execute. Callback receives (command, reason, target_system) and returns bool (or awaitable bool)."""
     global _approval_callback
     _approval_callback = callback
+
+
+def init_skills_dir(skills_path: str) -> None:
+    """Set the directory used by load_skill (repo skills/ folder)."""
+    global _skills_dir
+    _skills_dir = Path(skills_path).resolve()
+    log_event(logger, "skills_dir_initialized", path=str(_skills_dir))
+
+
+def init_terminal(cfg: "TerminalConfig", workspace: str) -> None:
+    """Configure shell execution backend (local bash or docker exec)."""
+    from mose.terminal import init_terminal as _init_terminal_backend
+
+    _init_terminal_backend(cfg, workspace)
 
 
 def init_workspace(workspace: str, allow_read_outside: bool = True) -> None:
@@ -110,19 +127,6 @@ def _check_write_allowed(path: Path) -> str | None:
     except ValueError:
         return f"Blocked: writes are confined to workspace ({_workspace}). Path {resolved} is outside."
 
-BLOCKED_PATTERNS = [
-    r"\brm\s+-rf\s+/\s*$",
-    r"\brm\s+-rf\s+/\s+",
-    r"\bmkfs\b",
-    r"\bdd\s+if=",
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\binit\s+0\b",
-    r"\bsystemctl\s+(halt|poweroff|reboot)\b",
-    r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  # fork bomb
-    r"\b>\s*/dev/sda",
-]
-
 # --- Tool schemas (OpenAI function-calling format) ---
 
 NATIVE_TOOLS: list[dict[str, Any]] = [
@@ -130,7 +134,10 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute a bash command. Use for system commands, git, package management, etc.",
+            "description": (
+                "Execute a read-only shell command (allowlisted: status, logs, docker ps/logs, curl, ls, cat, etc.). "
+                "For anything that changes state, use sre_execute instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -223,6 +230,26 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                         "description": "Max recursion depth. Default: 3.",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": (
+                "Load the full text of a domain skill from the skills directory by basename (e.g. 'docker'). "
+                "Use when skill_loading_mode is level_0 and you need details not in the system prompt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill basename without .md (e.g. 'docker', 'proxmox').",
+                    },
+                },
+                "required": ["name"],
             },
         },
     },
@@ -457,18 +484,37 @@ async def call_native_tool(
 # --- Tool implementations ---
 
 
-def _check_blocked(command: str) -> str | None:
-    """Return an error message if the command matches a blocked pattern."""
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, command):
-            return f"Blocked: command matches dangerous pattern '{pattern}'"
-    return None
-
-
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n... (truncated, {len(text)} total chars)"
+
+
+async def _run_shell(command: str, timeout: int, cwd: str | None, *, require_allowlist: bool) -> str:
+    """Run via terminal backend; bash requires allowlist, sre_execute allows any non-dangerous command."""
+    if require_allowlist and not is_bash_allowlisted(command):
+        return bash_rejection_message(command)
+    if not require_allowlist and is_dangerous_command(command):
+        return f"Blocked: command matches a dangerous pattern and cannot run even with approval: {command!r}"
+
+    from mose.terminal import get_backend
+
+    timeout = min(timeout, BASH_MAX_TIMEOUT)
+    cwd_use = cwd or (_workspace and str(_workspace))
+    try:
+        res = await get_backend().run(command, timeout, cwd_use)
+    except Exception as e:
+        logger.exception("shell run failed")
+        return f"Error: {e}"
+
+    output = ""
+    if res.stdout:
+        output += res.stdout
+    if res.stderr:
+        output += ("\n--- stderr ---\n" if output else "") + res.stderr
+    if res.exit_code != 0:
+        output += f"\n(exit code: {res.exit_code})"
+    return _truncate(output, BASH_MAX_OUTPUT) if output else "(no output)"
 
 
 async def _tool_bash(args: dict, **kwargs) -> str:
@@ -476,42 +522,10 @@ async def _tool_bash(args: dict, **kwargs) -> str:
     if not command:
         return "Error: 'command' is required"
 
-    blocked = _check_blocked(command)
-    if blocked:
-        return blocked
-
     timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
     cwd = args.get("cwd") or (_workspace and str(_workspace))
 
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.to_thread(
-                subprocess.run,
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                cwd=cwd,
-                timeout=timeout,
-            ),
-            timeout=timeout + 5,  # extra margin for thread overhead
-        )
-    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
-        return f"Error: Command timed out after {timeout}s"
-    except FileNotFoundError:
-        return f"Error: Working directory not found: {cwd}"
-
-    output = ""
-    if proc.stdout:
-        output += proc.stdout
-    if proc.stderr:
-        output += ("\n--- stderr ---\n" if output else "") + proc.stderr
-
-    if proc.returncode != 0:
-        output += f"\n(exit code: {proc.returncode})"
-
-    return _truncate(output, BASH_MAX_OUTPUT) if output else "(no output)"
+    return await _run_shell(command, timeout, cwd, require_allowlist=True)
 
 
 async def _tool_sre_execute(args: dict, **kwargs) -> str:
@@ -526,9 +540,8 @@ async def _tool_sre_execute(args: dict, **kwargs) -> str:
     if not target_system:
         return "Error: 'target_system' is required"
 
-    blocked = _check_blocked(command)
-    if blocked:
-        return blocked
+    if is_dangerous_command(command):
+        return f"Blocked: dangerous pattern in command: {command!r}"
 
     if _approval_callback is None:
         log_event(logger, "sre_execute_denied", reason="no_approval_callback", target_system=target_system)
@@ -548,35 +561,7 @@ async def _tool_sre_execute(args: dict, **kwargs) -> str:
     timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
     cwd = _workspace and str(_workspace)
 
-    try:
-        proc = await asyncio.wait_for(
-            asyncio.to_thread(
-                subprocess.run,
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                cwd=cwd,
-                timeout=timeout,
-            ),
-            timeout=timeout + 5,
-        )
-    except (asyncio.TimeoutError, subprocess.TimeoutExpired):
-        return f"Error: Command timed out after {timeout}s"
-    except FileNotFoundError:
-        return f"Error: Working directory not found: {cwd}"
-
-    output = ""
-    if proc.stdout:
-        output += proc.stdout
-    if proc.stderr:
-        output += ("\n--- stderr ---\n" if output else "") + proc.stderr
-
-    if proc.returncode != 0:
-        output += f"\n(exit code: {proc.returncode})"
-
-    return _truncate(output, BASH_MAX_OUTPUT) if output else "(no output)"
+    return await _run_shell(command, timeout, cwd, require_allowlist=False)
 
 
 async def _tool_read_file(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
@@ -681,6 +666,24 @@ async def _tool_list_directory(args: dict, **kwargs) -> str:
 
     _walk(path, 0)
     return "\n".join(entries) if entries else "(empty directory)"
+
+
+async def _tool_load_skill(args: dict, **kwargs) -> str:
+    """Load one skill file by basename (level_0 mode on-demand)."""
+    name = (args.get("name") or "").strip()
+    if not name:
+        return "Error: 'name' is required"
+    if not re.match(r"^[\w\-]+$", name):
+        return "Error: name must be a simple basename (letters, numbers, underscore, hyphen)"
+    if _skills_dir is None:
+        return "Error: skills directory not configured"
+    path = _skills_dir / f"{name}.md"
+    if not path.is_file():
+        return f"Error: skill not found: {name}.md"
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"Error reading skill: {e}"
 
 
 async def _tool_web_fetch(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
@@ -863,7 +866,10 @@ async def _tool_summarize_paper(args: dict, context: str = "", llm=None, root=No
 
     # Fetch metadata directly via arXiv API (always, to get the abstract)
     try:
-        import arxiv as arxiv_lib
+        try:
+            import arxiv as arxiv_lib
+        except ImportError:
+            return "Error: arxiv package not installed. Run: pip install 'mose-agent[paper]'"
         client = arxiv_lib.Client()
         paper = next(client.results(arxiv_lib.Search(id_list=[arxiv_id])))
         paper_meta = {
@@ -1143,6 +1149,7 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
 _TOOL_REGISTRY: dict[str, Any] = {
     "bash": _tool_bash,
     "sre_execute": _tool_sre_execute,
+    "load_skill": _tool_load_skill,
     "read_file": _tool_read_file,
     "write_file": _tool_write_file,
     "list_directory": _tool_list_directory,

@@ -10,8 +10,11 @@ context_window = 98304
 
 [signal]
 # phone_number loaded from SIGNAL_PHONE env var
+# admin_recipient loaded from SIGNAL_ADMIN env var (where proactive
+# skill-proposal and skill-review messages are sent)
 daemon_host = "127.0.0.1"
 daemon_port = 7583
+proposal_timeout_seconds = 43200   # 12 hours
 
 [memory]
 db_path = "data/memory.db"
@@ -29,6 +32,32 @@ workspace = "data/workspace"
 allow_read_outside = true
 skills_path = "skills"
 recent_messages_limit = 15
+
+[terminal]
+# "local" for dev; "docker" when agent container uses docker.sock to exec into mose-sandbox
+backend = "local"
+container = "mose-sandbox"
+workspace_mount = "/workspace"
+
+[learning]
+# The agent NEVER auto-builds a skill. A proposal is drafted and a human must
+# approve via Signal (or the CLI) before the skill body is generated.
+enabled = true
+pending_dir = "skills/pending"
+rejected_dir = "skills/rejected"
+approval_required = true       # kept for compatibility, always enforced
+min_tools_used = 3             # only propose after this many native tool calls
+skill_loading_mode = "full"    # full | level_0 (index-only for token thrift)
+# Periodic skill-quality review (writes Markdown report + structured log events)
+skill_review_failure_threshold = 0.3
+review_interval_hours = 168     # 1 week
+review_min_samples = 5          # require at least N uses before flagging
+review_log_dir = "data/logs"
+review_startup_delay_seconds = 300
+# Startup grace window for approved-but-unbuilt skills (crashed mid-draft).
+# The admin is notified and the build auto-starts after this delay unless
+# they reply "stop <slug>" or "cancel <slug>". Default: 15 minutes.
+build_grace_window_seconds = 900
 
 [observe]
 log_dir = "data/logs"

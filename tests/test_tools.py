@@ -10,9 +10,10 @@ import pytest
 
 from unittest.mock import AsyncMock, MagicMock
 
+from mose.config import TerminalConfig
+from mose.bash_policy import is_bash_allowlisted, is_dangerous_command
 from mose.tools import (
     NATIVE_TOOLS,
-    _check_blocked,
     _check_write_allowed,
     _CODE_TASK_ALLOWED_TOOLS,
     _DELEGATE_ALLOWED_TOOLS,
@@ -21,6 +22,8 @@ from mose.tools import (
     init_approval,
     init_workspace,
     init_tool_registry,
+    init_terminal,
+    init_skills_dir,
     is_native_tool,
     verify_tool_result,
 )
@@ -33,7 +36,11 @@ def setup_workspace(tmp_path):
     """Set workspace to a temp dir for all tests."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
     init_workspace(str(workspace))
+    init_terminal(TerminalConfig(backend="local"), str(workspace))
+    init_skills_dir(str(skills))
     return workspace
 
 
@@ -41,7 +48,7 @@ class TestToolRegistry:
     def test_all_tools_registered(self):
         names = {t["function"]["name"] for t in NATIVE_TOOLS}
         assert names == {
-            "bash", "sre_execute", "read_file", "write_file", "list_directory",
+            "bash", "sre_execute", "load_skill", "read_file", "write_file", "list_directory",
             "web_fetch", "web_search", "list_available_tools", "use_tool",
             "summarize_paper", "delegate", "code_task",
         }
@@ -97,26 +104,35 @@ class TestBashTool:
         result = await call_native_tool("bash", json.dumps({"command": "echo json_test"}))
         assert "json_test" in result
 
+    @pytest.mark.asyncio
+    async def test_load_skill(self, tmp_path, setup_workspace):
+        skills = tmp_path / "skills"
+        (skills / "docker.md").write_text("# Docker skill\nContent line.")
+        init_skills_dir(str(skills))
+        result = await call_native_tool("load_skill", {"name": "docker"})
+        assert "Content line" in result
 
-class TestBlockedPatterns:
-    def test_rm_rf_root_blocked(self):
-        assert _check_blocked("rm -rf /") is not None
-        assert _check_blocked("rm -rf / --no-preserve-root") is not None
 
-    def test_mkfs_blocked(self):
-        assert _check_blocked("mkfs.ext4 /dev/sda1") is not None
+class TestDangerousPatterns:
+    def test_rm_rf_root(self):
+        assert is_dangerous_command("rm -rf /")
+        assert is_dangerous_command("rm -rf / --no-preserve-root")
 
-    def test_dd_blocked(self):
-        assert _check_blocked("dd if=/dev/zero of=/dev/sda") is not None
+    def test_mkfs_dd_shutdown(self):
+        assert is_dangerous_command("mkfs.ext4 /dev/sda1")
+        assert is_dangerous_command("dd if=/dev/zero of=/dev/sda")
+        assert is_dangerous_command("shutdown -h now")
 
-    def test_shutdown_blocked(self):
-        assert _check_blocked("shutdown -h now") is not None
 
-    def test_safe_commands_allowed(self):
-        assert _check_blocked("ls -la") is None
-        assert _check_blocked("echo hello") is None
-        assert _check_blocked("rm -rf ./build") is None
-        assert _check_blocked("cat /etc/hostname") is None
+class TestBashAllowlist:
+    def test_readonly_ok(self):
+        assert is_bash_allowlisted("ls -la")
+        assert is_bash_allowlisted("echo hello")
+        assert is_bash_allowlisted("cat /etc/hostname")
+
+    def test_mutations_not_allowlisted(self):
+        assert not is_bash_allowlisted("rm -rf ./build")
+        assert not is_bash_allowlisted("sudo reboot")
 
 
 class TestSreExecute:

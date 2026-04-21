@@ -1,0 +1,101 @@
+# Mose agent + isolated shell sandbox, for a Linux Docker host.
+#
+# Prerequisites on the host:
+#   - Docker Engine >= 24
+#   - The deploying user is in the `docker` group
+#   - Build-time:  DOCKER_GID=$(getent group docker | cut -d: -f3)
+#   - Runtime:     LLM_ENDPOINT points at a local OpenAI-compatible server
+#                  (TabbyAPI, vLLM, llama.cpp server, ...)
+#
+# Bring up:
+#   export DOCKER_GID=$(getent group docker | cut -d: -f3)
+#   docker compose build
+#   docker compose up -d mose-sandbox mose-agent
+#
+# Periodic skill review (run from a systemd timer on the host):
+#   docker compose run --rm mose-skill-review
+
+services:
+  # Isolated shell target. The agent `exec`s into this container instead of
+  # running shell commands directly inside its own container.
+  mose-sandbox:
+    image: ubuntu:24.04
+    container_name: mose-sandbox
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - mose-net
+    volumes:
+      - mose-workspace:/workspace
+
+  # Main agent. Runs as the non-root `mose` user inside the image.
+  mose-agent:
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
+    container_name: mose-agent
+    depends_on:
+      - mose-sandbox
+    environment:
+      TERMINAL_BACKEND: docker
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-http://host.docker.internal:5000/v1}
+      LLM_MODEL: ${LLM_MODEL:-model}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      SIGNAL_PHONE: ${SIGNAL_PHONE:-}
+      SIGNAL_ADMIN: ${SIGNAL_ADMIN:-}
+    # extra_hosts maps host.docker.internal on Linux (native on macOS/Windows).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - mose-data:/app/data
+      - mose-workspace:/app/data/workspace
+      # Required for TERMINAL_BACKEND=docker so mose-agent can `docker exec`
+      # into mose-sandbox. The `mose` user is added to the `docker` group at
+      # build time; for tighter deployments front the socket with a proxy.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - mose-net
+    restart: unless-stopped
+
+  # One-shot service: run a skill-quality review and exit. Invoked from a
+  # systemd timer on the host (see ops/systemd/mose-skill-review.*).
+  mose-skill-review:
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
+    profiles: ["review"]
+    depends_on:
+      - mose-sandbox
+    environment:
+      TERMINAL_BACKEND: docker
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-http://host.docker.internal:5000/v1}
+      LLM_MODEL: ${LLM_MODEL:-model}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      SIGNAL_PHONE: ${SIGNAL_PHONE:-}
+      SIGNAL_ADMIN: ${SIGNAL_ADMIN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - mose-data:/app/data
+      - mose-workspace:/app/data/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - mose-net
+    command: ["python", "-m", "mose", "--skill-review"]
+
+networks:
+  mose-net:
+    driver: bridge
+
+volumes:
+  mose-data:
+  mose-workspace:

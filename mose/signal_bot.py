@@ -18,6 +18,301 @@ MAX_MESSAGE_LENGTH = 4000  # Practical limit for Signal readability
 
 _approval_ctx: ContextVar[dict] = ContextVar("signal_approval_ctx", default={})
 
+# Set by MoseSignalBot.start(); used by the proactive proposal/review callbacks
+# which are invoked outside any specific incoming-message context.
+_active_bot: "MoseSignalBot | None" = None
+
+
+def _format_ts(epoch: float) -> str:
+    """Render an epoch timestamp as ISO8601 UTC."""
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(float(epoch), tz=timezone.utc).isoformat(timespec="minutes")
+    except (OverflowError, OSError, ValueError):
+        return str(epoch)
+
+
+async def _signal_skill_propose_callback(
+    path: str, slug: str, title: str, description: str, rationale: str, expires_at: float
+) -> None:
+    """Fire-and-forget Signal notification for a new skill proposal.
+
+    The reply arrives asynchronously via ``_handle_skill_approval_reply``
+    below. This function MUST NOT block waiting for a reply — the pending
+    state is already durable in SQLite and the decision may arrive in a
+    different process (after a restart).
+    """
+    bot = _active_bot
+    if bot is None:
+        logger.warning("signal_skill_propose_no_bot", extra={"slug": slug})
+        return
+    admin = bot.config.admin_recipient
+    if not admin:
+        logger.warning("signal_skill_propose_no_admin", extra={"slug": slug})
+        return
+
+    prompt = (
+        "New skill proposal\n\n"
+        f"Slug: {slug}\n"
+        f"Title: {title}\n"
+        f"Description: {description}\n\n"
+        f"Rationale:\n{rationale}\n\n"
+        f"Proposal file: {path}\n"
+        f"Expires: {_format_ts(expires_at)} (UTC)\n\n"
+        f"Reply with either of the following to approve:\n"
+        f"  approve {slug}\n  yes {slug}\n  y {slug}\n\n"
+        f"To reject, use the same syntax with 'reject' / 'no' / 'n'. A bare\n"
+        f"'yes' / 'no' also works when exactly one proposal is pending."
+    )
+    try:
+        await bot._send_message(admin, prompt)
+    except Exception:
+        logger.exception("signal_skill_propose_send_failed", extra={"slug": slug})
+
+
+async def _signal_skill_reminder_callback(
+    slug: str, title: str, description: str, expires_at: float
+) -> None:
+    """Re-ping the admin after a restart for proposals that are still pending."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin = bot.config.admin_recipient
+    if not admin:
+        return
+    msg = (
+        "Reminder: skill proposal still pending\n\n"
+        f"Slug: {slug}\n"
+        f"Title: {title}\n"
+        f"Description: {description}\n"
+        f"Expires: {_format_ts(expires_at)} (UTC)\n\n"
+        f"Reply 'approve {slug}' to build, 'reject {slug}' to discard."
+    )
+    try:
+        await bot._send_message(admin, msg)
+    except Exception:
+        logger.exception("signal_skill_reminder_send_failed", extra={"slug": slug})
+
+
+async def _signal_skill_recovery_notice(
+    still_pending: list[Any],
+    expired_while_down: list[Any],
+    approved_unbuilt: list[Any],
+) -> None:
+    """Consolidated startup recovery message.
+
+    Sends exactly ONE Signal message to the admin listing every approval
+    that was outstanding when the agent restarted:
+
+    - ``still_pending`` — decision needed (reply ``approve``/``reject``)
+    - ``expired_while_down`` — informational only (already rejected)
+    - ``approved_unbuilt`` — build will auto-proceed after the grace
+      window unless the admin replies ``stop <slug>`` / ``cancel <slug>``
+
+    Sends nothing when all three lists are empty.
+    """
+    if not still_pending and not expired_while_down and not approved_unbuilt:
+        return
+    bot = _active_bot
+    if bot is None:
+        return
+    admin = bot.config.admin_recipient
+    if not admin:
+        return
+
+    def _title_of(row: Any) -> str:
+        payload = getattr(row, "payload", None) or {}
+        return (payload.get("title") or row.slug) if isinstance(payload, dict) else row.slug
+
+    lines: list[str] = ["Agent restart recovery"]
+
+    if still_pending:
+        lines.append("")
+        lines.append(f"Still pending ({len(still_pending)}) — your decision needed:")
+        for row in still_pending:
+            lines.append(
+                f"  - {row.slug} — {_title_of(row)} "
+                f"(expires {_format_ts(row.expires_at)} UTC)"
+            )
+        lines.append("")
+        lines.append(
+            "Reply 'approve <slug>' to build or 'reject <slug>' to discard. "
+            "A bare 'yes' / 'no' works when exactly one is pending."
+        )
+
+    if approved_unbuilt:
+        import time as _time
+        learner = getattr(bot.agent, "_skill_learner", None)
+        grace = max(0, int(getattr(learner, "_build_grace_seconds", 900)))
+        build_at = _time.time() + grace
+        mins = grace // 60 if grace >= 60 else 0
+        window_label = f"{mins} min" if mins else f"{grace}s"
+        lines.append("")
+        lines.append(
+            f"Approved but not yet built ({len(approved_unbuilt)}) — "
+            f"I'll start building in {window_label} (~{_format_ts(build_at)} UTC). "
+            "Reply 'stop <slug>' or 'cancel <slug>' to abort:"
+        )
+        for row in approved_unbuilt:
+            lines.append(f"  - {row.slug} — {_title_of(row)}")
+
+    if expired_while_down:
+        lines.append("")
+        lines.append(
+            f"Expired while I was down ({len(expired_while_down)}) — "
+            "no action needed, already moved to skills/rejected/:"
+        )
+        for row in expired_while_down:
+            lines.append(
+                f"  - {row.slug} — {_title_of(row)} "
+                f"(expired {_format_ts(row.expires_at)} UTC)"
+            )
+
+    try:
+        await bot._send_message(admin, "\n".join(lines))
+    except Exception:
+        logger.exception(
+            "signal_skill_recovery_send_failed",
+            extra={
+                "still_pending": len(still_pending),
+                "expired_while_down": len(expired_while_down),
+                "approved_unbuilt": len(approved_unbuilt),
+            },
+        )
+
+
+async def _signal_skill_review_notify(report_path: str, summary: str) -> None:
+    """Send a short skill-review summary to the admin via Signal."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin = bot.config.admin_recipient
+    if not admin:
+        return
+    await bot._send_message(
+        admin,
+        "Skill Review Report\n\n"
+        f"{summary}\n\n"
+        f"Full report on disk: {report_path}\n"
+        "I made NO changes. Reply with instructions to apply any action.",
+    )
+
+
+_APPROVE_VERBS = {"approve", "yes", "y"}
+_REJECT_VERBS = {"reject", "no", "n", "deny"}
+_CANCEL_VERBS = {"stop", "cancel", "abort", "halt"}
+
+
+def _parse_approval_reply(
+    text: str,
+) -> tuple[str | None, str | None]:
+    """Parse an admin reply. Returns ``(slug_or_None, action_or_None)``.
+
+    ``action`` is one of:
+
+    - ``"approve"`` — proceed with building ``slug`` (when pending)
+    - ``"reject"`` — discard the pending proposal for ``slug``
+    - ``"cancel"`` — abort an approved-but-unbuilt build during its grace
+      window (``stop``/``cancel``/``abort``/``halt``)
+    - ``None`` — the message is not a decision reply
+
+    When the slug is omitted the caller is expected to resolve it against
+    the single outstanding item of the relevant kind.
+    """
+    tokens = text.strip().split()
+    if not tokens:
+        return None, None
+    verb = tokens[0].lower().rstrip(":,")
+    if verb in _APPROVE_VERBS:
+        action = "approve"
+    elif verb in _REJECT_VERBS:
+        action = "reject"
+    elif verb in _CANCEL_VERBS:
+        action = "cancel"
+    else:
+        return None, None
+    if len(tokens) >= 2:
+        candidate = tokens[1].lower().strip(":,;.")
+        if candidate.startswith("slug="):
+            candidate = candidate[len("slug="):]
+        return (candidate or None), action
+    return None, action
+
+
+async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: str) -> bool:
+    """If ``text`` looks like a skill-approval reply from the admin, apply it.
+
+    Understands three action verbs:
+
+    - ``approve`` / ``yes`` / ``y`` — build a pending proposal
+    - ``reject`` / ``no`` / ``n`` / ``deny`` — discard a pending proposal
+    - ``stop`` / ``cancel`` / ``abort`` / ``halt`` — abort an
+      approved-but-unbuilt skill during its startup grace window
+
+    Returns True if the message was consumed (and should NOT be routed to
+    the agent), False otherwise.
+    """
+    if source != bot.config.admin_recipient:
+        return False
+    slug, action = _parse_approval_reply(text)
+    if action is None:
+        return False
+
+    memory = getattr(bot.agent, "memory", None)
+
+    if action == "cancel":
+        # Resolve bare 'stop'/'cancel' against approved-but-unbuilt orphans.
+        if slug is None:
+            if memory is None:
+                return False
+            approved = memory.list_approved_approvals(kind="skill_proposal")
+            if len(approved) != 1:
+                await bot._send_message(
+                    source,
+                    f"{len(approved)} skills in their grace window; please include "
+                    f"the slug (e.g. 'stop my-skill').",
+                )
+                return True
+            slug = approved[0].slug
+        ok = await bot.agent.cancel_approved_build(slug)
+        if ok:
+            await bot._send_message(source, f"Skill build for '{slug}' cancelled.")
+        else:
+            await bot._send_message(
+                source,
+                f"No approved-but-unbuilt skill found for '{slug}' "
+                "(already built, already cancelled, or unknown slug).",
+            )
+        return True
+
+    # Resolve a bare approve/reject verb against the admin's pending queue.
+    if slug is None:
+        if memory is None:
+            return False
+        pending = memory.list_pending_approvals(
+            kind="skill_proposal", recipient=source,
+        )
+        if len(pending) != 1:
+            await bot._send_message(
+                source,
+                f"{len(pending)} skill proposals pending; please include the slug "
+                f"(e.g. 'approve my-skill').",
+            )
+            return True
+        slug = pending[0].slug
+
+    approved = action == "approve"
+    from mose.learning import handle_skill_decision
+    applied = await handle_skill_decision(slug, approved=approved)
+    if applied:
+        verb = "approved — building now" if approved else "rejected"
+        await bot._send_message(source, f"Skill '{slug}' {verb}.")
+    else:
+        await bot._send_message(
+            source, f"No pending proposal found for '{slug}' (already decided or expired)."
+        )
+    return True
+
 
 def set_approval_context(sender: str, bot: "MoseSignalBot") -> None:
     """Set context for sre_execute approval (sender phone, bot)."""
@@ -155,6 +450,10 @@ class MoseSignalBot:
         self._rpc_pending: dict[str, asyncio.Future[dict]] = {}
         self._pending_approval: dict[str, asyncio.Future[bool]] = {}
         self._running = False
+        # Optional zero-arg coroutine invoked once after the first successful
+        # connect. Set by the launcher to run startup recovery tasks that
+        # depend on the bot being live (e.g. consolidated approvals notice).
+        self.on_ready: Any = None
 
     async def _connect(self) -> None:
         """Connect to the signal-cli TCP daemon."""
@@ -237,13 +536,20 @@ class MoseSignalBot:
         if not content:
             return
 
-        # Check if this is an approval reply
+        # Check if this is an sre_execute approval reply (in-memory, 60s future)
         if source in self._pending_approval:
             future = self._pending_approval.get(source)
             if future and not future.done():
                 approved = content.lower() in ("y", "yes", "approve")
                 future.set_result(approved)
             return
+
+        # Check if this is a durable skill-proposal approval reply from the admin.
+        try:
+            if await _handle_skill_approval_reply(self, source, content):
+                return
+        except Exception:
+            logger.exception("skill approval reply handling failed")
 
         session_id = _session_id_for(source)
         log_event(logger, "signal_message", session_id=session_id, source=source)
@@ -291,15 +597,30 @@ class MoseSignalBot:
             log_event(logger, "signal_reader_stopped")
 
     async def start(self) -> None:
-        """Connect to signal-cli and run the message loop with reconnection."""
+        """Connect to signal-cli and run the message loop with reconnection.
+
+        Fires ``self.on_ready`` (a coroutine-returning callable) exactly
+        once — after the FIRST successful connect — so callers can deliver
+        messages that require the bot to be live (e.g. the startup
+        pending-approval recovery notice).
+        """
+        global _active_bot
+        _active_bot = self
         self._running = True
         backoff = 1.0
         max_backoff = 60.0
+        ready_fired = False
 
         while self._running:
             try:
                 await self._connect()
                 backoff = 1.0
+                if not ready_fired and getattr(self, "on_ready", None) is not None:
+                    ready_fired = True
+                    try:
+                        await self.on_ready()
+                    except Exception:
+                        logger.exception("signal_on_ready_callback_failed")
                 self._reader_task = asyncio.create_task(self._reader_loop())
                 await self._reader_task
             except asyncio.CancelledError:
@@ -311,6 +632,9 @@ class MoseSignalBot:
 
     async def close(self) -> None:
         """Stop the bot and close the connection."""
+        global _active_bot
+        if _active_bot is self:
+            _active_bot = None
         self._running = False
         if self._reader_task:
             self._reader_task.cancel()

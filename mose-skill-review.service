@@ -1,0 +1,20 @@
+[Unit]
+Description=Mose Agent - Skill Quality Review (oneshot)
+After=network-online.target worker-agent.service
+Wants=network-online.target
+# The review uses the LLM to generate recommendations, so the worker must be up.
+Requires=worker-agent.service
+
+[Service]
+Type=oneshot
+User=mose
+WorkingDirectory=/home/mose/mose-agent
+EnvironmentFile=-/home/mose/mose-agent/.env
+ExecStart=/home/mose/mose-agent/.venv/bin/python -m mose --skill-review
+StandardOutput=journal
+StandardError=journal
+# Keep review runs auditable: the unit exits 0 even if no candidates were found;
+# the full Markdown report is written under data/logs/skill-review-YYYY-MM-DD.md.
+
+[Install]
+WantedBy=multi-user.target

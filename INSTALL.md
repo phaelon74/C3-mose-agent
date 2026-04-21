@@ -1,192 +1,309 @@
 # Installation Guide
 
-Complete setup instructions for deploying the Mose Agent on a Linux homelab server.
+Complete setup instructions for the Mose SRE/DevOps agent on a **Linux Docker
+host**. Windows hosts are intentionally not supported — the agent is developed
+and deployed on Linux only.
 
-## Prerequisites
+Two deployment shapes are supported:
+
+| Shape | When to pick it |
+|---|---|
+| **Docker Compose (recommended)** | Production. The agent runs in a container, shell tools `docker exec` into an isolated sandbox container, a non-root user is enforced, and the host Docker socket is the only privileged mount. |
+| **Bare metal + systemd** | Homelab on the same box that hosts vLLM / TabbyAPI. The agent runs as a dedicated non-root `mose` user under systemd. |
+
+Both shapes rely on the same source tree and the same `config.toml`. Pick the
+shape you want, follow its section, then come back to the shared sections at
+the bottom (memory/MCP/Signal/skill review).
+
+---
+
+## Prerequisites (common)
 
 | Requirement | Minimum |
 |---|---|
-| OS | Ubuntu 22.04+ (or any systemd-based Linux) |
-| Python | 3.11+ |
-| NVIDIA GPUs | 4x RTX 3060 (12GB each, 48GB total) |
-| NVIDIA Driver | 570+ |
-| CUDA Toolkit | 13.0 |
-| RAM | 32GB+ recommended |
-| Disk | 30GB free (model weights + venv + runtime data) |
+| OS | Ubuntu 22.04+, Debian 12+, or equivalent systemd-based Linux |
+| Python | 3.11+ (for bare-metal install) |
+| Docker Engine | 24+ (for Docker Compose install) |
+| An OpenAI-compatible LLM | TabbyAPI, vLLM, or llama.cpp server reachable from the host |
+| RAM | 32 GB+ recommended |
+| Disk | 30 GB free (model weights + venv + runtime data) |
 
-Verify your GPU stack before proceeding:
+For GPU-accelerated local LLM serving (e.g. vLLM in the `worker-agent.service`
+unit), you additionally need recent NVIDIA drivers and a matching CUDA
+toolkit. Verify your stack before proceeding:
 
 ```bash
-nvidia-smi          # driver loaded, GPUs visible
-nvcc --version      # should report CUDA 13.0
+nvidia-smi
+nvcc --version
 ```
 
 ---
 
-## 1. Create the Service User
+## A. Docker Compose deployment (recommended)
 
-Create a dedicated `Mose` user to run the agent. No sudo rights are needed for the user itself.
+### A.1 Create the operator user
+
+The whole deployment — build, run, and `docker compose` calls — should happen
+as a **non-root** user that is a member of the host's `docker` group. This
+user does not need sudo to run the agent.
 
 ```bash
-sudo useradd -m -s /bin/bash Mose
-sudo passwd Mose
+sudo useradd -m -s /bin/bash mose
+sudo usermod -aG docker mose
+sudo -u mose -i            # switch to the mose user for the rest of this section
 ```
 
-Add the user to groups required for GPU access:
+### A.2 Clone the repository
 
 ```bash
-sudo usermod -aG video Mose
-sudo usermod -aG render Mose
-```
-
----
-
-## 2. Clone the Repository
-
-```bash
-sudo -u Mose -i   # switch to the Mose user
 cd ~
 git clone https://github.com/phaelon74/C3-luna-agent.git mose-agent
 cd mose-agent
 ```
 
----
-
-## 3. Create the Python Virtual Environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .
-```
-
-To install dev/test dependencies as well:
-
-```bash
-pip install -e ".[dev]"
-```
-
-### vLLM (LLM Server)
-
-vLLM must be installed in the same venv. For CUDA 13.0, install PyTorch with
-CUDA 13 first, then vLLM. See the
-[vLLM install docs](https://docs.vllm.ai/en/latest/getting_started/installation.html)
-for your CUDA version.
-
-```bash
-# For CUDA 13.0, install PyTorch cu130 first:
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
-
-# Then install vLLM
-pip install vllm
-```
-
-The model weights (`QuantTrio/Qwen3.5-27B-AWQ`) are downloaded automatically on
-first launch by vLLM/Hugging Face.
-
----
-
-## 4. Create Runtime Directories
-
-The `data/` directory is gitignored and must be created manually:
-
-```bash
-mkdir -p data/{logs,workspace,tool_outputs}
-```
-
-Final layout at runtime:
-
-```
-~/mose-agent/
-├── data/
-│   ├── memory.db            # SQLite database (created on first run)
-│   ├── logs/                # Structured JSON logs
-│   │   └── mose-YYYY-MM-DD.jsonl
-│   ├── workspace/           # Sandboxed working directory for tools
-│   └── tool_outputs/        # Persisted large tool output files
-```
-
----
-
-## 5. Configure the Environment File
-
-Copy the example and fill in the values you need:
+### A.3 Configure environment variables
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` and set at minimum the interface you want to use:
+Edit `.env` and set the interface(s) you want. For a Signal-first SRE
+deployment, set:
 
 ```bash
-# For Discord bot mode (omit for CLI-only)
-DISCORD_TOKEN=your-discord-bot-token
+# LLM endpoint (TabbyAPI, vLLM, llama.cpp server — any OpenAI-compatible API)
+LLM_ENDPOINT=http://host.docker.internal:5000/v1
+LLM_MODEL=your-served-model-name
+LLM_API_KEY=your-tabby-or-vllm-bearer-token   # empty string allowed for local vLLM
 
-# For Signal bot mode (requires signal-cli, see Section 9)
-SIGNAL_PHONE=+1234567890
+# Signal interface (see Section E)
+SIGNAL_PHONE=+15551234567        # the phone number linked to signal-cli
+SIGNAL_ADMIN=+15559876543        # where proactive messages (skill proposals, review summaries) go
+
+# Or: Discord, if you prefer that interface (no skill-proposal UX in Discord)
+DISCORD_TOKEN=your-discord-bot-token
 ```
 
-The `.env` file can also hold API keys for any MCP-connected services
-(Radarr, Sonarr, Plex, Proxmox, etc.) — see `.env.example` for the full list.
+`host.docker.internal` resolves to the host inside the container thanks to the
+`extra_hosts` entry in `docker-compose.yml`. If your LLM server is on a
+separate machine, set `LLM_ENDPOINT` to that IP/URL directly.
+
+### A.4 Build the image with the correct `docker` GID
+
+The agent runs inside the container as a non-root user (`mose`, uid 1000).
+For it to use the host Docker socket (required for `TERMINAL_BACKEND=docker`)
+the in-container `docker` group must match the host's `docker` group id:
+
+```bash
+export DOCKER_GID=$(getent group docker | cut -d: -f3)
+docker compose build --build-arg DOCKER_GID=$DOCKER_GID
+```
+
+Add `DOCKER_GID` to your shell profile (or a `.env` loaded by your shell)
+so future `docker compose build` commands pick it up automatically.
+
+### A.5 Launch the sandbox and the agent
+
+```bash
+docker compose up -d mose-sandbox
+docker compose up -d mose-agent
+docker compose logs -f mose-agent
+```
+
+On the first run, the agent creates its SQLite memory database under the
+`mose-data` named volume and starts either the Signal or Discord bot
+depending on what you set in `.env`.
+
+### A.6 Verify the isolation
+
+```bash
+# Agent runs as the mose user (uid 1000)
+docker compose exec mose-agent id
+#   uid=1000(mose) gid=1000(mose) groups=1000(mose),<docker-gid>(docker)
+
+# Shell tools execute inside the sandbox container, NOT the agent container
+docker compose exec mose-agent python -c "from mose.terminal import get_backend; print(type(get_backend()).__name__)"
+#   DockerTerminalBackend
+```
+
+### A.7 Periodic skill review (Docker)
+
+See Section F for the scheduling options — the Docker Compose file exposes a
+`mose-skill-review` one-shot service that you invoke from a systemd timer on
+the host:
+
+```bash
+docker compose --profile review run --rm mose-skill-review
+```
 
 ---
 
-## 6. Configure the Agent
+## B. Bare-metal + systemd deployment
 
-Edit `config.toml` to match your hardware. The defaults work for the reference
-hardware (4x RTX 3060, vLLM on port 8001):
+Use this shape on the same host that runs your LLM server when you prefer a
+fully native install.
+
+### B.1 Create the service user
+
+```bash
+sudo useradd -m -s /bin/bash mose
+sudo usermod -aG video,render mose     # GPU access for local LLM serving
+```
+
+No sudo rights are granted. The SRE agent reads whatever its user account can
+read; any state-changing action must go through `sre_execute`, which requires
+human approval.
+
+### B.2 Clone the repository
+
+```bash
+sudo -u mose -i
+cd ~
+git clone https://github.com/phaelon74/C3-luna-agent.git mose-agent
+cd mose-agent
+```
+
+### B.3 Create the Python virtualenv
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e ".[dev]"
+```
+
+### B.4 Generate a reproducible lockfile with `uv` (strongly recommended)
+
+`uv` produces a `uv.lock` that pins every transitive dependency. Install it
+once, then lock the repo:
+
+```bash
+pip install uv
+uv lock                 # generates uv.lock from pyproject.toml
+uv sync                 # installs exactly what the lockfile pins
+```
+
+Commit `uv.lock` to the repo so every host installs the same versions.
+Refresh the lockfile whenever you change `pyproject.toml`:
+
+```bash
+uv lock --upgrade       # bump deps within the declared version ranges
+```
+
+### B.5 Install vLLM (optional, only if you run it on this host)
+
+```bash
+# CUDA 13 wheels — adjust to match your driver / CUDA toolkit
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+pip install vllm
+```
+
+Model weights (`QuantTrio/Qwen3.5-27B-AWQ`) are downloaded automatically on
+first launch.
+
+### B.6 Create runtime directories
+
+```bash
+mkdir -p data/{logs,workspace,tool_outputs}
+```
+
+### B.7 Configure the agent
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Fill in `LLM_ENDPOINT`, `LLM_API_KEY` (if applicable), `SIGNAL_PHONE`,
+`SIGNAL_ADMIN`, and any other interface tokens you need. Adjust
+`config.toml` if the defaults don't match your hardware.
+
+### B.8 Install systemd units
+
+```bash
+sudo cp worker-agent.service        /etc/systemd/system/
+sudo cp mose-agent.service          /etc/systemd/system/
+sudo cp mose-skill-review.service   /etc/systemd/system/
+sudo cp mose-skill-review.timer     /etc/systemd/system/
+sudo cp signal-cli-daemon.service   /etc/systemd/system/   # optional, Signal only
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now worker-agent
+sudo systemctl enable --now mose-agent
+sudo systemctl enable --now mose-skill-review.timer
+```
+
+Check status and logs:
+
+```bash
+systemctl status mose-agent
+journalctl -u mose-agent -f
+systemctl list-timers 'mose-*'
+journalctl -u mose-skill-review -n 200
+```
+
+---
+
+## C. Configuration reference
+
+All values live in `config.toml`. The most relevant sections for an SRE
+deployment:
 
 ```toml
 [llm]
-endpoint = "http://localhost:8001/v1"
-model = "QuantTrio/Qwen3.5-27B-AWQ"
+endpoint = "http://host.docker.internal:5000/v1"  # TabbyAPI example
+model = "your-model-name"
 max_tokens = 16384
 context_window = 98304
 
-[memory]
-db_path = "data/memory.db"
-summary_interval = 8        # summarize every N messages
+[terminal]
+# "local" runs bash on the same machine as the agent.
+# "docker" runs bash inside mose-sandbox via docker exec (recommended).
+backend = "docker"
+container = "mose-sandbox"
 
-[agent]
-workspace = "data/workspace"
-skills_path = "skills"
+[signal]
+daemon_host = "127.0.0.1"
+daemon_port = 7583
+proposal_timeout_seconds = 43200   # 12 hours
 
-[observe]
-log_dir = "data/logs"
-log_level = "INFO"
+[learning]
+# Skill proposals are written to skills/pending/ and require explicit human
+# approval (via Signal) before the skill body is generated. Nothing is ever
+# auto-built or auto-deleted.
+enabled = true
+min_tools_used = 3
+skill_loading_mode = "full"              # full | level_0
+
+# Periodic skill-quality review
+skill_review_failure_threshold = 0.3     # flag skills failing >= 30% of runs
+review_interval_hours = 168              # weekly
+review_min_samples = 5                   # require >= 5 uses before flagging
+review_log_dir = "data/logs"
+
+# Startup grace window for approved-but-unbuilt skills (crashed mid-draft).
+# The admin sees a warning and the build auto-proceeds after this delay
+# unless they reply "stop <slug>" / "cancel <slug>".
+build_grace_window_seconds = 900         # 15 minutes
 ```
 
-Environment variables override config file values — see the table in the README
-for the full mapping.
+Environment variables that override the file:
+`DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ADMIN`, `LLM_ENDPOINT`, `LLM_MODEL`,
+`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_CONTEXT_WINDOW`, `MEMORY_DB_PATH`,
+`LOG_DIR`, `TERMINAL_BACKEND`.
 
 ---
 
-## 7. Configure MCP Servers (Optional)
+## D. MCP servers (optional)
 
-MCP servers give the agent additional tools beyond the built-ins. Copy the
-example and edit:
+MCP servers expose extra tools to the agent. Copy the example and edit:
 
 ```bash
 cp mcp_servers.example.json mcp_servers.json
 ```
 
-Each server entry specifies a command to spawn via stdio transport:
-
-```json
-{
-  "servers": {
-    "paper_db": {
-      "command": ".venv/bin/python",
-      "args": ["data/workspace/paper_db/paper_db_server.py"],
-      "transport": "stdio"
-    }
-  }
-}
-```
-
-If you don't need MCP tools, create an empty config:
+For no MCP servers, an empty config is fine:
 
 ```json
 { "servers": {} }
@@ -194,198 +311,225 @@ If you don't need MCP tools, create an empty config:
 
 ---
 
-## 8. Install Systemd Services
+## E. Signal bot setup
 
-These commands require an admin user with sudo. The services themselves run as
-the `Mose` user — no elevated privileges at runtime.
-
-```bash
-# Copy service files
-sudo cp /home/Mose/mose-agent/worker-agent.service /etc/systemd/system/
-sudo cp /home/Mose/mose-agent/mose-agent.service /etc/systemd/system/
-
-# Reload and enable
-sudo systemctl daemon-reload
-sudo systemctl enable worker-agent
-sudo systemctl enable mose-agent
-```
-
-### Start the LLM server first
-
-The agent depends on the LLM server (`worker-agent`), so start it first and
-wait for it to finish loading the model:
+### E.1 Install signal-cli
 
 ```bash
-sudo systemctl start worker-agent
-journalctl -u worker-agent -f
-```
-
-Wait until you see vLLM listening on port 8001, then start the agent:
-
-```bash
-sudo systemctl start mose-agent
-journalctl -u mose-agent -f
-```
-
-### Service dependency chain
-
-```
-worker-agent.service       (vLLM, port 8001)
-       ↑
-mose-agent.service         (the bot — Requires=worker-agent)
-       ↑
-signal-cli-daemon.service  (optional — Wants=signal-cli-daemon)
-```
-
----
-
-## 9. Signal Bot Setup (Optional)
-
-If you want to use Signal instead of (or alongside) Discord:
-
-### Install signal-cli
-
-```bash
-# Download the latest release (0.14.0+ required for JSON-RPC daemon mode)
-# See: https://github.com/AsamK/signal-cli/releases
 sudo mkdir -p /opt/signal-cli
 sudo tar xf signal-cli-0.14.x-Linux.tar.gz -C /opt/signal-cli --strip-components=1
 ```
 
-### Link your Signal account
+### E.2 Link your account (as the mose user)
 
 ```bash
-sudo -u Mose /opt/signal-cli/bin/signal-cli link -n "Mose Agent"
+sudo -u mose /opt/signal-cli/bin/signal-cli link -n "Mose Agent"
 ```
 
-Scan the QR code with your phone's Signal app (Settings > Linked Devices).
+Scan the QR with your phone's Signal app (Settings → Linked Devices).
 
-### Install the daemon service
+### E.3 Daemon service
 
-Edit `signal-cli-daemon.service` and replace `+YOUR_PHONE_NUMBER` with your
-actual linked Signal number, then install:
+Edit `signal-cli-daemon.service` and replace `+YOUR_PHONE_NUMBER` with the
+phone number you just linked, then install:
 
 ```bash
-sudo cp /home/Mose/mose-agent/signal-cli-daemon.service /etc/systemd/system/
+sudo cp signal-cli-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now signal-cli-daemon
 ```
 
-Set the phone number in `.env`:
+### E.4 Wire the agent
+
+Set both `SIGNAL_PHONE` (the linked device number) and `SIGNAL_ADMIN` (where
+proactive messages are sent — typically your personal number) in `.env`:
 
 ```bash
-SIGNAL_PHONE=+1234567890
+SIGNAL_PHONE=+15551234567
+SIGNAL_ADMIN=+15559876543
+```
+
+The admin recipient receives:
+
+- **Skill proposals** — the agent asks "may I build this skill?" and stores a
+  durable `pending_approvals` row in SQLite with a default **12 hour** expiry.
+  The admin replies at their convenience with:
+
+  ```
+  approve <slug>         # or: yes <slug>  / y <slug>
+  reject <slug>          # or: no <slug>   / n <slug>
+  yes                    # works only when exactly one proposal is pending
+  ```
+
+  Replies are processed via `handle_skill_decision`, which atomically flips
+  the DB row and (on approval) asks the LLM for the full skill body.
+- **Skill review summaries** — produced by the periodic review job, with a
+  pointer to the full Markdown report under `data/logs/skill-review-*.md`.
+
+The agent never builds, edits, or deletes a skill without an explicit
+approval reply from the admin.
+
+### Durability across restarts
+
+Pending approvals are persisted in the `pending_approvals` table in
+`data/memory.db`, so they survive agent restarts, `docker compose build`,
+systemd redeploys, and crashes. On every startup the agent runs a
+**recovery pass** and delivers a single consolidated notice to the admin
+covering everything that was outstanding:
+
+- **Still pending** — items that are still within their timeout. The
+  notice lists each slug/title/expiry and reminds the admin of the reply
+  syntax (`approve <slug>` / `reject <slug>`). These require a decision.
+- **Approved but not yet built** — orphans from a crash that happened
+  *after* an approval was recorded but *before* the LLM finished drafting
+  the skill body. The recovery notice warns the admin that a build is
+  queued and will auto-start after the configured grace window
+  (`learning.build_grace_window_seconds`, default **15 minutes**). The
+  admin can abort it with `stop <slug>` or `cancel <slug>` on Signal, or
+  `python -m mose --decide <slug> cancel` on the command line. Cancelling
+  moves the proposal JSON to `skills/rejected/` with reason
+  `user_cancelled_build`. If the agent crashes again inside the grace
+  window, the next startup presents the same orphan with a fresh 15-min
+  window — always giving the admin a chance to stop it.
+- **Expired while I was down** — items whose `expires_at` fell in the
+  past while the agent was offline. Their proposal files are moved to
+  `skills/rejected/` with reason `timeout_across_restart` and the DB row
+  is marked `expired`. These are listed **for awareness only** — no
+  reply is needed.
+
+If all three lists are empty the agent stays silent (no notification
+noise). The recovery notice fires exactly once per startup, after the
+Signal bot has connected, so the admin sees the full picture in one
+message. In CLI mode the same three sections are printed to stdout on
+startup.
+
+An operator can also drive decisions manually without waiting for Signal:
+
+```bash
+# Apply a decision directly (pending proposals only)
+python -m mose --decide my-skill approve        # or reject
+
+# Abort an approved-but-unbuilt skill during its grace window
+python -m mose --decide my-skill cancel         # stop / abort / halt also work
+
+# Trigger the sweep by hand (handy after a long outage)
+python -m mose --sweep-approvals
 ```
 
 ---
 
-## 10. Verify the Installation
+## F. Periodic skill review
 
-### Quick smoke test (CLI mode)
+There are two overlapping mechanisms and you can enable either or both:
 
-Run without Discord/Signal tokens to get an interactive REPL:
+1. **Built-in background task.** When the agent runs, it schedules its own
+   in-process review every `review_interval_hours` (default 168 = weekly)
+   after a `review_startup_delay_seconds` cushion. The review writes a
+   Markdown report to `data/logs/skill-review-YYYY-MM-DD.md` and, if a
+   review callback is configured (Signal), sends a summary to the admin.
+2. **Systemd timer** (`mose-skill-review.timer`). Runs the one-shot
+   `mose-skill-review.service` on a cron-like schedule (Mondays 03:30 by
+   default). Use this when you want reviews to happen on a predictable
+   wall-clock schedule regardless of when the agent restarts.
 
-```bash
-sudo -u Mose -i
-cd ~/mose-agent
-source .venv/bin/activate
-python -m mose
-```
-
-You should see:
-
-```
-Mose CLI (type 'exit' or Ctrl+D to quit)
-Session: cli-1741500000
-
-mose>
-```
-
-Type a message and confirm you get a response. Tool calls print inline.
-
-### Run the test suite
+### Manual run
 
 ```bash
-source .venv/bin/activate
-pytest tests/ -v
+# Bare metal
+sudo -u mose /home/mose/mose-agent/.venv/bin/python -m mose --skill-review
+
+# Docker Compose
+docker compose --profile review run --rm mose-skill-review
 ```
 
-### Check the services
+Skip Signal notification with `--skill-review-no-notify`:
 
 ```bash
-# Status
-sudo systemctl status worker-agent
-sudo systemctl status mose-agent
-
-# Live logs
-journalctl -u mose-agent -f
-
-# Structured log inspection
-jq '.' /home/Mose/mose-agent/data/logs/mose-*.jsonl | head -50
+python -m mose --skill-review --skill-review-no-notify
 ```
+
+### Report contents
+
+Each review emits a structured JSON log event (`skill_review_completed`) and
+writes a Markdown report with:
+
+- Total skills, number of candidates, threshold used
+- A table of every skill (usage count, failure rate)
+- For each candidate (usage ≥ `review_min_samples` AND failure rate ≥
+  `skill_review_failure_threshold`): a recommended action
+  (**rewrite / disable / keep / delete**), the LLM's reason, and optional
+  suggested changes.
+
+Nothing is applied automatically. The report and the Signal summary are the
+agent's only outputs — an operator must review and action them.
 
 ---
 
-## Troubleshooting
+## G. Operational security notes
+
+- **Non-root everywhere.** The `mose` user has no sudo rights on bare metal;
+  inside the container it runs as uid 1000. The only elevated capability is
+  access to the Docker socket via the `docker` group, and only so the agent
+  can `exec` into the sandbox container. Replace with a socket proxy for
+  stricter deployments.
+- **Sandboxed shell.** The `bash` tool is an **allowlist** (read-only,
+  diagnostic commands only). Anything that changes state must go through
+  `sre_execute`, which requires explicit human approval via Signal or CLI.
+- **Command policy.** `mose/bash_policy.py` centralises both the allowlist
+  and the "always blocked" denylist (`rm -rf /`, `mkfs`, etc.) as a defense
+  in depth layer on top of `sre_execute`.
+- **Skill learning is human-in-the-loop.** The learning loop drafts
+  proposals but *never* writes a skill body without Signal approval. The
+  periodic review surfaces skills that are misbehaving but *never*
+  modifies them.
+- **Secrets.** `.env` should be `chmod 600`. `mcp_servers.json` is
+  gitignored. `data/memory.db` is gitignored and user-readable only.
+- **Network exposure.** vLLM binds `0.0.0.0:8001` by default — restrict
+  with a host firewall if the box is network-reachable.
+
+---
+
+## H. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `CUDA error: no kernel image` | Driver/CUDA version mismatch | Update NVIDIA driver to 570+ and reinstall vLLM for CUDA 13.0 |
-| `Connection refused` on port 8001 | worker-agent not running | `sudo systemctl start worker-agent` and check `journalctl -u worker-agent` |
-| `Permission denied` on GPU | Mose user not in video/render groups | `sudo usermod -aG video,render Mose` then log out/in |
-| `ModuleNotFoundError` | venv not activated or package missing | `source .venv/bin/activate && pip install -e .` |
-| Empty LLM responses | Model still loading | Wait for vLLM to report ready in `journalctl -u worker-agent` |
-| `OutOfMemoryError` during startup | GPU memory exhausted | Reduce `--gpu-memory-utilization` or `--max-model-len` |
-| `OutOfMemoryError` during CUDA graph capture | Graph capture too large for 12GB cards | Reduce `cudagraph_capture_sizes` in the `-O` flag (e.g. `[1, 2, 4]`) |
-| `mcp_servers.json` not found | File is gitignored | Copy from `mcp_servers.example.json` (see Section 7) |
-| `DISCORD_TOKEN` not set | Missing `.env` or env var | Set in `.env` or export before running |
-| SQLite errors on first run | `data/` directory missing | `mkdir -p data/{logs,workspace,tool_outputs}` |
-| Signal bot won't connect | signal-cli not linked or daemon down | Check `systemctl status signal-cli-daemon` and re-link if needed |
+| `permission denied while trying to connect to /var/run/docker.sock` inside the container | `DOCKER_GID` build arg didn't match the host group | Rebuild: `DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build` |
+| `CUDA error: no kernel image` | Driver/CUDA version mismatch | Update NVIDIA driver and reinstall vLLM for the matching CUDA toolkit |
+| `Connection refused` on port 8001 | `worker-agent` service not running | `sudo systemctl start worker-agent` and inspect `journalctl -u worker-agent` |
+| `ModuleNotFoundError` | venv not activated / lockfile not synced | `source .venv/bin/activate && uv sync` (or `pip install -e ".[dev]"`) |
+| Empty LLM responses | Model still loading | Wait for the LLM server to report ready |
+| Signal bot won't connect | `signal-cli-daemon` down or not linked | `systemctl status signal-cli-daemon`; re-link if needed |
+| Skill proposals never arrive on Signal | `SIGNAL_ADMIN` not set or admin number wrong | Set `SIGNAL_ADMIN` in `.env` and restart the agent |
+| Skill review timer never fires | Timer not enabled | `sudo systemctl enable --now mose-skill-review.timer && systemctl list-timers 'mose-*'` |
 
 ---
 
-## Directory and File Reference
+## I. Directory reference
 
 ```
-~/mose-agent/                          # /home/Mose/mose-agent
-├── .env                               # Secrets (chmod 600, gitignored)
-├── .env.example                       # Template for .env
-├── config.toml                        # Agent configuration
-├── mcp_servers.json                   # MCP server registry (gitignored)
-├── mcp_servers.example.json           # Template for mcp_servers.json
-├── pyproject.toml                     # Python package definition
-├── mose-agent.service                 # systemd unit — the agent
-├── worker-agent.service               # systemd unit — vLLM LLM server
-├── signal-cli-daemon.service          # systemd unit — signal-cli JSON-RPC
-├── mose/                              # Source code
-│   ├── __main__.py                    # Entry point (python -m mose)
-│   ├── agent.py                       # Core agent loop
-│   ├── llm.py                         # LLM client
-│   ├── memory.py                      # Persistent memory (SQLite + vectors)
-│   ├── tools.py                       # Native tools (bash, files, web, etc.)
-│   ├── tool_output.py                 # Large output handling pipeline
-│   ├── mcp_manager.py                 # MCP tool client
-│   ├── discord_bot.py                 # Discord interface
-│   ├── signal_bot.py                  # Signal interface
-│   ├── observe.py                     # Structured JSON logging
-│   └── config.py                      # Config loader
-├── skills/                            # Agent skill files (homelab knowledge)
-├── tests/                             # Test suite
-└── data/                              # Runtime data (gitignored, create manually)
-    ├── memory.db                      # SQLite database
-    ├── logs/                          # mose-YYYY-MM-DD.jsonl
-    ├── workspace/                     # Tool sandbox
-    └── tool_outputs/                  # Persisted large outputs
+~/mose-agent/                           # /home/mose/mose-agent
+├── .env                                # Secrets (chmod 600, gitignored)
+├── .env.example                        # Template for .env
+├── config.toml                         # Agent configuration
+├── mcp_servers.json                    # MCP server registry (gitignored)
+├── mcp_servers.example.json            # Template for mcp_servers.json
+├── pyproject.toml                      # Python package definition
+├── uv.lock                             # Pinned dependency versions (committed)
+├── docker-compose.yml                  # Docker Compose deployment
+├── Dockerfile                          # Agent image (non-root, docker GID aware)
+├── mose-agent.service                  # systemd unit — the agent
+├── mose-skill-review.service           # systemd unit — one-shot skill review
+├── mose-skill-review.timer             # systemd unit — weekly review schedule
+├── worker-agent.service                # systemd unit — vLLM LLM server
+├── signal-cli-daemon.service           # systemd unit — signal-cli JSON-RPC
+├── mose/                               # Source code
+├── skills/                             # Approved skills (loaded into the system prompt)
+│   ├── pending/                        # Drafted proposals awaiting human approval
+│   └── rejected/                       # Audit trail of declined proposals
+├── tests/                              # Test suite
+└── data/                               # Runtime data (gitignored, create manually)
+    ├── memory.db                       # SQLite database
+    ├── logs/                           # mose-YYYY-MM-DD.jsonl + skill-review-*.md
+    ├── workspace/                      # Tool sandbox
+    └── tool_outputs/                   # Persisted large outputs
 ```
-
----
-
-## Security Notes
-
-- The `Mose` user has **no sudo rights**. All agent processes run unprivileged.
-- The `bash` tool blocks destructive commands (`rm -rf /`, `mkfs`, `shutdown`, etc.).
-- File writes are sandboxed to `data/workspace/` — the agent cannot write outside it.
-- The `sre_execute` tool requires human approval (via Discord reaction or CLI prompt) before running state-changing commands.
-- `.env` should be `chmod 600` — it contains API keys and tokens.
-- `mcp_servers.json` is gitignored to prevent leaking server configurations.
-- vLLM binds to `0.0.0.0:8001` — restrict with a firewall if the host is network-exposed.

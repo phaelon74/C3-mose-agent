@@ -18,15 +18,16 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "discord.py>=2.4",
-    "openai>=1.0",
-    "mcp[cli]",
+    "discord.py>=2.4,<3",
+    "openai>=1.0,<3",
+    "mcp[cli]>=1.0,<2",
     "sentence-transformers",
     "einops",
     "sqlite-vec",
     "tomli>=2.0;python_version<'3.11'",
     "html2text",
     "ddgs>=7.0",
+    "docker>=7.0,<8",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ dev = [
 ]
 cloud = ["boto3>=1.34"]
 drivepool = ["pypsrp>=0.10"]
+paper = ["arxiv>=2.0"]
 
 [tool.setuptools.packages.find]
 include = ["mose*"]

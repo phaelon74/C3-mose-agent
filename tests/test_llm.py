@@ -32,6 +32,15 @@ class TestLLMClient:
         assert client.config.model == "test"
         assert client.client.base_url.host == "localhost"
 
+    def test_api_key_from_config(self):
+        config = LLMConfig(
+            endpoint="http://localhost:5000/v1",
+            model="test",
+            api_key="tabby-test-key",
+        )
+        client = LLMClient(config)
+        assert client.config.api_key == "tabby-test-key"
+
 
 class TestTemperatureOverride:
     def _make_client(self, config_temp: float = 0.7) -> LLMClient:

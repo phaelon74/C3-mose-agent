@@ -4,10 +4,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=Mose
-WorkingDirectory=/home/Mose/mose-agent
+User=mose
+WorkingDirectory=/home/mose/mose-agent
 Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu"
-ExecStart=/home/Mose/mose-agent/.venv/bin/vllm serve /home/Mose/QuantTrio/Qwen3.5-27B-AWQ \
+ExecStart=/home/mose/mose-agent/.venv/bin/vllm serve /home/mose/QuantTrio/Qwen3.5-27B-AWQ \
   --tensor-parallel-size 4 \
   --port 8001 \
   --host 0.0.0.0 \
@@ -16,6 +16,7 @@ ExecStart=/home/Mose/mose-agent/.venv/bin/vllm serve /home/Mose/QuantTrio/Qwen3.
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --enable-auto-tool-choice \
+  --served-model-name QuantTrio/Qwen3.5-27B-AWQ \
   --trust-remote-code \
   --compilation-config.cudagraph_capture_sizes [1,2,4,8]
 Restart=always

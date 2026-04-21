@@ -52,6 +52,35 @@ CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id);
 """
 
+SKILL_USAGE_SQL = """
+CREATE TABLE IF NOT EXISTS skill_usage (
+    id INTEGER PRIMARY KEY,
+    skill_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_name ON skill_usage(skill_name);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_session ON skill_usage(session_id);
+"""
+
+PENDING_APPROVALS_SQL = """
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    slug TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,                          -- 'skill_proposal' (future: more kinds)
+    recipient TEXT NOT NULL,
+    proposal_path TEXT,
+    payload TEXT,                                -- JSON blob with free-form context
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',      -- pending | approved | rejected | expired
+    decided_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_recipient ON pending_approvals(recipient, status);
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_expires ON pending_approvals(expires_at);
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -84,6 +113,19 @@ class MemoryResult:
     created_at: float
 
 
+@dataclass
+class PendingApproval:
+    slug: str
+    kind: str
+    recipient: str
+    proposal_path: str
+    payload: dict[str, Any]
+    created_at: float
+    expires_at: float
+    status: str
+    decided_at: float | None = None
+
+
 class MemoryManager:
     """Persistent memory with hybrid keyword + vector search."""
 
@@ -103,6 +145,8 @@ class MemoryManager:
         self.db.enable_load_extension(False)
 
         self._init_schema()
+        self._ensure_skill_usage()
+        self._ensure_pending_approvals()
         log_event(logger, "memory_initialized", db_path=config.db_path)
 
     def _init_schema(self) -> None:
@@ -119,6 +163,209 @@ class MemoryManager:
             )
         self._vec_initialized = True
         self.db.commit()
+
+    def _ensure_skill_usage(self) -> None:
+        """Migrate older DBs that lack skill_usage."""
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='skill_usage'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(SKILL_USAGE_SQL)
+            self.db.commit()
+
+    def _ensure_pending_approvals(self) -> None:
+        """Migrate older DBs that lack pending_approvals."""
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_approvals'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(PENDING_APPROVALS_SQL)
+            self.db.commit()
+
+    # ---------------------------------------------------------- approvals
+
+    def save_pending_approval(
+        self,
+        *,
+        slug: str,
+        kind: str,
+        recipient: str,
+        proposal_path: str,
+        payload: dict[str, Any] | None,
+        expires_at: float,
+    ) -> None:
+        """Insert or replace a pending approval row. Idempotent by ``slug``."""
+        now = time.time()
+        self.db.execute(
+            "INSERT OR REPLACE INTO pending_approvals "
+            "(slug, kind, recipient, proposal_path, payload, created_at, expires_at, status, decided_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL)",
+            (slug, kind, recipient, proposal_path, json.dumps(payload or {}), now, expires_at),
+        )
+        self.db.commit()
+
+    def get_pending_approval(self, slug: str) -> PendingApproval | None:
+        row = self.db.execute(
+            "SELECT slug, kind, recipient, proposal_path, payload, created_at, expires_at, status, decided_at "
+            "FROM pending_approvals WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return self._row_to_approval(row)
+
+    def list_pending_approvals(
+        self,
+        *,
+        kind: str | None = None,
+        recipient: str | None = None,
+        status: str = "pending",
+    ) -> list[PendingApproval]:
+        sql = (
+            "SELECT slug, kind, recipient, proposal_path, payload, created_at, expires_at, status, decided_at "
+            "FROM pending_approvals WHERE status = ?"
+        )
+        params: list[Any] = [status]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if recipient is not None:
+            sql += " AND recipient = ?"
+            params.append(recipient)
+        sql += " ORDER BY created_at ASC"
+        rows = self.db.execute(sql, params).fetchall()
+        out: list[PendingApproval] = []
+        for r in rows:
+            approval = self._row_to_approval(r)
+            if approval is not None:
+                out.append(approval)
+        return out
+
+    def expire_pending_approvals(self, *, now: float | None = None) -> list[PendingApproval]:
+        """Flip any unexpired rows whose ``expires_at`` is in the past to 'expired'.
+
+        Returns the list of rows that just transitioned — callers are responsible
+        for moving their proposal files to ``skills/rejected/`` and notifying.
+        """
+        now = now if now is not None else time.time()
+        expired = self.db.execute(
+            "SELECT slug, kind, recipient, proposal_path, payload, created_at, expires_at, status, decided_at "
+            "FROM pending_approvals WHERE status = 'pending' AND expires_at <= ?",
+            (now,),
+        ).fetchall()
+        if expired:
+            self.db.executemany(
+                "UPDATE pending_approvals SET status = 'expired', decided_at = ? WHERE slug = ?",
+                [(now, row[0]) for row in expired],
+            )
+            self.db.commit()
+        return [a for a in (self._row_to_approval(r) for r in expired) if a is not None]
+
+    def list_approved_approvals(
+        self, *, kind: str | None = None
+    ) -> list[PendingApproval]:
+        """Return every row whose ``status='approved'``.
+
+        Callers combine this with a filesystem check (is ``skills/{slug}.md``
+        absent?) to detect "approved but not yet built" orphans — rows that
+        were decided before the agent crashed mid-body-draft.
+        """
+        return self.list_pending_approvals(kind=kind, status="approved")
+
+    def cancel_approved_approval(self, slug: str) -> PendingApproval | None:
+        """Atomically flip a ``status='approved'`` row to ``'rejected'``.
+
+        Used when an operator aborts an approved-but-unbuilt skill during
+        its grace window. Returns the row (pre-transition) on success,
+        ``None`` if the slug is unknown or already in some other state.
+        """
+        now = time.time()
+        existing = self.get_pending_approval(slug)
+        if existing is None or existing.status != "approved":
+            return None
+        cur = self.db.execute(
+            "UPDATE pending_approvals SET status = 'rejected', decided_at = ? "
+            "WHERE slug = ? AND status = 'approved'",
+            (now, slug),
+        )
+        self.db.commit()
+        if cur.rowcount == 0:
+            return None
+        return existing
+
+    def decide_pending_approval(self, slug: str, *, approved: bool) -> PendingApproval | None:
+        """Atomically transition a pending row to approved/rejected.
+
+        Returns the row as it existed BEFORE the transition (with status still
+        'pending') if the transition succeeded, else ``None`` (already decided
+        or unknown slug). Callers should treat ``None`` as idempotent no-op.
+        """
+        now = time.time()
+        existing = self.get_pending_approval(slug)
+        if existing is None or existing.status != "pending":
+            return None
+        status = "approved" if approved else "rejected"
+        cur = self.db.execute(
+            "UPDATE pending_approvals SET status = ?, decided_at = ? "
+            "WHERE slug = ? AND status = 'pending'",
+            (status, now, slug),
+        )
+        self.db.commit()
+        if cur.rowcount == 0:
+            return None
+        return existing
+
+    @staticmethod
+    def _row_to_approval(row: tuple | None) -> PendingApproval | None:
+        if row is None:
+            return None
+        slug, kind, recipient, proposal_path, payload, created_at, expires_at, status, decided_at = row
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except (TypeError, json.JSONDecodeError):
+            parsed = {}
+        return PendingApproval(
+            slug=slug,
+            kind=kind,
+            recipient=recipient,
+            proposal_path=proposal_path or "",
+            payload=parsed,
+            created_at=float(created_at),
+            expires_at=float(expires_at),
+            status=status,
+            decided_at=float(decided_at) if decided_at is not None else None,
+        )
+
+    def record_skill_usage(self, skill_name: str, session_id: str, outcome: str) -> None:
+        """Record whether a skill was used successfully (outcome: success|failure)."""
+        self.db.execute(
+            "INSERT INTO skill_usage (skill_name, session_id, outcome, created_at) VALUES (?, ?, ?, ?)",
+            (skill_name, session_id, outcome, time.time()),
+        )
+        self.db.commit()
+
+    def skill_failure_rates(self, limit_sessions: int = 500) -> dict[str, float]:
+        """Rough failure rate per skill from recent rows (for future self-improvement)."""
+        rows = self.db.execute(
+            "SELECT skill_name, outcome FROM skill_usage ORDER BY id DESC LIMIT ?",
+            (limit_sessions,),
+        ).fetchall()
+        counts: dict[str, list[int]] = {}
+        for name, out in rows:
+            if name not in counts:
+                counts[name] = [0, 0]
+            counts[name][0] += 1
+            if out == "failure":
+                counts[name][1] += 1
+        return {k: v[1] / v[0] if v[0] else 0.0 for k, v in counts.items()}
+
+    def skill_usage_counts(self, limit_sessions: int = 500) -> dict[str, int]:
+        """Return total usage count per skill over the most recent ``limit_sessions`` rows."""
+        rows = self.db.execute(
+            "SELECT skill_name, COUNT(*) FROM ("
+            "  SELECT skill_name FROM skill_usage ORDER BY id DESC LIMIT ?"
+            ") GROUP BY skill_name",
+            (limit_sessions,),
+        ).fetchall()
+        return {name: int(count) for name, count in rows}
 
     @property
     def embedder(self):

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from mose.config import Config
+from mose.config import Config, LearningConfig
 from mose.llm import LLMClient, LLMResponse, ToolCall
 from mose.agent import Agent, _build_system_prompt, _load_skills
 from mose.tools import verify_tool_result as _verify_tool_result
@@ -57,6 +57,22 @@ class TestSystemPrompt:
         assert "Cloud3 SRE" in prompt
         assert "Test Skill" in prompt
         assert "Content here" in prompt
+
+    def test_skills_level_0_index(self, tmp_path):
+        """level_0 mode keeps overview + short index instead of full files."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "_overview.md").write_text("# Role\nOverview body.")
+        (skills_dir / "foo.md").write_text("# Foo title\nDetails here.")
+        lc = LearningConfig(skill_loading_mode="level_0")
+        prompt = _build_system_prompt(
+            [], None, "2026-01-01T00:00:00Z",
+            workspace="/home", skills_path=str(skills_dir), learning=lc,
+        )
+        assert "Overview body" in prompt
+        assert "load_skill" in prompt
+        assert "foo" in prompt.lower()
+        assert "Details here" not in prompt
 
 
 class TestLoadSkills:

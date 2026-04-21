@@ -12,8 +12,9 @@ Mose Agent — a minimal AI assistant with persistent memory, MCP tool use, and 
 # Activate venv (required for all commands)
 source .venv/bin/activate
 
-# Install dependencies
+# Install dependencies (recommended: uv for a lockfile — run `uv lock` then `uv sync`)
 pip install -e ".[dev]"
+# or: uv sync
 
 # Run the agent (needs DISCORD_TOKEN env var for Discord, otherwise interactive CLI)
 python -m mose

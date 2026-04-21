@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -59,9 +60,12 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
+        api_key = (config.api_key or os.environ.get("LLM_API_KEY") or "").strip()
+        if not api_key:
+            api_key = "not-needed"  # local vLLM / llama-server often need no key
         self.client = openai.AsyncOpenAI(
             base_url=config.endpoint,
-            api_key="not-needed",  # llama-server doesn't require a key
+            api_key=api_key,
         )
 
     async def chat(

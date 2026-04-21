@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly skill-quality review for the Mose agent
+
+[Timer]
+# Every Monday at 03:30 local time. Adjust OnCalendar to taste.
+OnCalendar=Mon *-*-* 03:30:00
+# If the host was off at the scheduled time, run on next boot.
+Persistent=true
+# Spread reviews across fleets (useful if you run many agents).
+RandomizedDelaySec=15m
+Unit=mose-skill-review.service
+
+[Install]
+WantedBy=timers.target

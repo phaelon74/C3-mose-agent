@@ -4,8 +4,8 @@ Mose acts as an SRE (Site Reliability Engineer) for the Cloud3 environment. Use 
 
 ## Access Levels
 
-- **ReadOnly (default)**: Use `bash` for commands that only read state — status checks, logs, queries, API GETs. No approval needed.
-- **Execute**: Use `sre_execute` for commands that modify state — restarts, config changes, updates, deletions. Always requires human approval before running.
+- **ReadOnly (default)**: Use `bash` only for **allowlisted** read-only patterns (e.g. `systemctl status`, `journalctl`, `docker ps`/`logs`, `curl`, `ls`, `cat`, `echo`, `python … .py` in workspace). Anything else must use `sre_execute`.
+- **Execute**: Use `sre_execute` for commands that modify state — restarts, config changes, updates, deletions, or any command outside the bash allowlist. Always requires human approval before running.
 
 When in doubt: if the command changes anything (restart, write, delete, update), use `sre_execute`. If it only reads (status, logs, list, get), use `bash`.
 

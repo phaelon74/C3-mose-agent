@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from pathlib import Path
 from typing import Any, Callable
 
-from mose.config import Config
+from mose.config import Config, LearningConfig
+from mose.learning import SkillLearner
 from mose.llm import LLMClient
 from mose.memory import MemoryManager
 from mose.mcp_manager import MCPManager
@@ -98,6 +100,7 @@ You are expected to use these tools proactively — do not describe what you cou
 - **sre_execute**: State-changing commands (restart, update, config changes). Requires human approval before running.
 - **read_file / write_file**: File I/O. Relative paths resolve to the workspace. Writes outside workspace are blocked.
 - **list_directory**: Browse the filesystem before reading specific files.
+- **load_skill**: Load full text of one domain skill by name when using condensed skill index (level_0).
 - **web_search**: Search the web via DuckDuckGo when you need current information, documentation, or facts you're unsure about.
 - **web_fetch**: Fetch and read a specific URL. Use after web_search to get details from a result.
 - **delegate**: Hand off a self-contained subtask to a sub-agent with its own tool loop. \
@@ -146,10 +149,50 @@ Current time: {current_time}
 Workspace: {workspace}"""
 
 
-def _load_skills(skills_dir: Path) -> str:
-    """Load and concatenate all .md files from the skills directory. Returns empty string if dir missing or empty."""
+def _skill_blurb(text: str, limit: int = 240) -> str:
+    """First heading or paragraph for level_0 index."""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            return s.lstrip("#").strip()[:limit]
+        if s and not s.startswith("---"):
+            return s[:limit]
+    return ""
+
+
+def _load_skills(skills_dir: Path, mode: str = "full") -> str:
+    """Load skills: full concatenation, or level_0 (overview + one-line index + load_skill for detail)."""
     if not skills_dir.exists() or not skills_dir.is_dir():
         return ""
+    if mode == "level_0":
+        overview_path = skills_dir / "_overview.md"
+        overview = ""
+        if overview_path.is_file():
+            try:
+                overview = overview_path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.warning("Failed to load _overview: %s", e)
+        index_lines: list[str] = []
+        files = sorted(
+            skills_dir.glob("*.md"),
+            key=lambda p: (p.name == "_overview.md", p.name),
+        )
+        for f in files:
+            if f.name == "_overview.md":
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.warning("Failed to read skill file %s: %s", f, e)
+                continue
+            blurb = _skill_blurb(text)
+            index_lines.append(f"- **{f.stem}** — {blurb or '(see load_skill)'}")
+        index_block = "\n".join(index_lines) if index_lines else ""
+        parts = [overview]
+        if index_block:
+            parts.append("### Skill index (use `load_skill` with the basename for full content)\n\n" + index_block)
+        return "\n\n".join(p for p in parts if p.strip())
+
     files = sorted(skills_dir.glob("*.md"), key=lambda p: (p.name != "_overview.md", p.name))
     if not files:
         return ""
@@ -168,6 +211,7 @@ def _build_system_prompt(
     current_time: str,
     workspace: str = "",
     skills_path: str = "",
+    learning: LearningConfig | None = None,
 ) -> str:
     memory_section = ""
     if memories:
@@ -182,7 +226,10 @@ def _build_system_prompt(
 
     skills_section = ""
     if skills_path:
-        content = _load_skills(Path(skills_path))
+        mode = "full"
+        if learning and getattr(learning, "skill_loading_mode", "full") == "level_0":
+            mode = "level_0"
+        content = _load_skills(Path(skills_path), mode=mode)
         if content:
             skills_section = f"\n\n## Cloud3 SRE Environment\n\n{content}\n\n"
 
@@ -212,6 +259,16 @@ class Agent:
         self.mcp = mcp
         self.max_tool_rounds = 25  # safety limit on tool call loops
         self.tool_callback = tool_callback
+        self._skill_learner = SkillLearner(
+            config.learning,
+            Path(config.agent.skills_path),
+            log_dir=Path(config.learning.review_log_dir),
+            proposal_timeout_seconds=int(config.signal.proposal_timeout_seconds),
+            build_grace_window_seconds=int(
+                getattr(config.learning, "build_grace_window_seconds", 900)
+            ),
+        )
+        self._review_task: asyncio.Task[Any] | None = None
 
     async def process(
         self,
@@ -239,6 +296,7 @@ class Agent:
             memories, summary, now,
             self.config.agent.workspace,
             self.config.agent.skills_path,
+            learning=self.config.learning,
         )
         recent = self.memory.get_recent_messages(
             session_id, limit=self.config.agent.recent_messages_limit
@@ -259,6 +317,8 @@ class Agent:
 
         # 7. Tool call loop
         rounds = 0
+        total_native_tool_calls = 0
+        had_tool_error = False
         while response.has_tool_calls() and rounds < self.max_tool_rounds:
             rounds += 1
 
@@ -277,6 +337,8 @@ class Agent:
             # Execute each tool call
             for tc in response.tool_calls:
                 log_event(logger, "tool_executing", tool=tc.name, session_id=session_id)
+                if is_native_tool(tc.name):
+                    total_native_tool_calls += 1
 
                 if status_callback is not None:
                     try:
@@ -299,6 +361,22 @@ class Agent:
                     logger.exception(f"Tool call failed: {tc.name}")
 
                 result = verify_tool_result(tc.name, result)
+                if (
+                    "Error" in result
+                    or result.startswith("Tool error")
+                    or result.startswith("Error:")
+                    or result.startswith("Blocked:")
+                ):
+                    had_tool_error = True
+                if tc.name == "load_skill" and is_native_tool(tc.name):
+                    try:
+                        args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
+                        sk = str(args.get("name", "")).strip()
+                        if sk:
+                            outcome = "failure" if "Error" in result else "success"
+                            self.memory.record_skill_usage(sk, session_id, outcome)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
                 if self.tool_callback is not None:
                     self.tool_callback(tc.name, tc.arguments, result)
                 messages.append({
@@ -349,6 +427,128 @@ class Agent:
             except Exception:
                 logger.exception("Background summarization failed")
 
+        # 11. Optional skill learning — propose-first, human-in-the-loop.
+        # The agent NEVER builds a skill on its own; it writes a proposal,
+        # persists a durable row in pending_approvals, and notifies the admin.
+        # The admin's reply (possibly after a restart) drives the actual build
+        # via handle_skill_decision.
+        if self.config.learning.enabled:
+            try:
+                await self._skill_learner.maybe_propose_skill(
+                    session_id,
+                    message,
+                    content,
+                    total_native_tool_calls,
+                    had_tool_error,
+                    self.llm,
+                    memory=self.memory,
+                    recipient=self.config.signal.admin_recipient,
+                )
+            except Exception:
+                logger.exception("Skill proposal failed")
+
         log_event(logger, "agent_response", session_id=session_id,
                   memory_hits=len(memories), tool_rounds=rounds)
         return content
+
+    # --------------------------------------------------- skill approval state
+
+    async def sweep_pending_approvals(self, *, reminder: bool = True) -> tuple[int, int]:
+        """Expire timed-out skill proposals and optionally re-ping admins.
+
+        Intended for periodic sweeps during normal operation. For
+        restart-recovery use :meth:`recover_pending_approvals` instead so
+        the admin sees a single consolidated message covering everything
+        that was outstanding.
+        """
+        try:
+            expired, reminded = await self._skill_learner.sweep_expired_approvals(
+                self.memory, reminder=reminder,
+            )
+        except Exception:
+            logger.exception("pending approvals sweep failed")
+            return 0, 0
+        log_event(logger, "pending_approvals_swept", expired=expired, reminded=reminded)
+        return expired, reminded
+
+    async def recover_pending_approvals(self) -> tuple[int, int, int]:
+        """Restart-recovery entrypoint.
+
+        Presents the admin with ALL outstanding skill approvals that were
+        waiting when the agent came back up:
+
+        - **still-pending** items require a decision,
+        - **expired-while-down** items are mentioned for awareness only,
+        - **approved-but-unbuilt** items schedule a grace-window build that
+          the admin can cancel with ``stop <slug>`` / ``cancel <slug>``.
+
+        Returns ``(still_pending_count, expired_while_down_count,
+        approved_unbuilt_count)``.
+        """
+        try:
+            still_pending, expired, orphans = await self._skill_learner.run_startup_recovery(
+                self.memory, llm=self.llm,
+            )
+        except Exception:
+            logger.exception("pending approvals recovery failed")
+            return 0, 0, 0
+        log_event(
+            logger,
+            "pending_approvals_recovered",
+            still_pending=len(still_pending),
+            expired_while_down=len(expired),
+            approved_unbuilt=len(orphans),
+        )
+        return len(still_pending), len(expired), len(orphans)
+
+    async def cancel_approved_build(self, slug: str) -> bool:
+        """Abort an approved-but-unbuilt skill during its grace window."""
+        return self._skill_learner.cancel_approved_build(slug, self.memory)
+
+    # ---------------------------------------------------------- skill review
+
+    async def run_skill_review(self, *, notify: bool = True) -> Path | None:
+        """One-shot skill review. Safe to call manually or from a systemd timer."""
+        log_event(logger, "skill_review_started", notify=notify)
+        report = await self._skill_learner.review_skills(self.memory, self.llm, notify=notify)
+        log_event(logger, "skill_review_finished", report=str(report) if report else None)
+        return report
+
+    def start_skill_review_loop(self) -> None:
+        """Spawn a background task that periodically runs ``run_skill_review``."""
+        if not self.config.learning.enabled:
+            return
+        if self._review_task is not None and not self._review_task.done():
+            return
+
+        interval = max(1, int(self.config.learning.review_interval_hours)) * 3600
+        startup_delay = max(0, int(self.config.learning.review_startup_delay_seconds))
+
+        async def _loop() -> None:
+            try:
+                if startup_delay > 0:
+                    await asyncio.sleep(startup_delay)
+                while True:
+                    try:
+                        await self.run_skill_review(notify=True)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Periodic skill review failed")
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                log_event(logger, "skill_review_loop_cancelled")
+                raise
+
+        self._review_task = asyncio.create_task(_loop(), name="skill-review-loop")
+        log_event(logger, "skill_review_loop_started", interval_hours=self.config.learning.review_interval_hours)
+
+    async def stop_skill_review_loop(self) -> None:
+        if self._review_task is None:
+            return
+        self._review_task.cancel()
+        try:
+            await self._review_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._review_task = None

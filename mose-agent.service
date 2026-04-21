@@ -6,10 +6,10 @@ Requires=worker-agent.service
 
 [Service]
 Type=simple
-User=Mose
-WorkingDirectory=/home/Mose/mose-agent
-EnvironmentFile=-/home/Mose/mose-agent/.env
-ExecStart=/home/Mose/mose-agent/.venv/bin/python -m mose
+User=mose
+WorkingDirectory=/home/mose/mose-agent
+EnvironmentFile=-/home/mose/mose-agent/.env
+ExecStart=/home/mose/mose-agent/.venv/bin/python -m mose
 Restart=always
 RestartSec=10
 StandardOutput=journal
