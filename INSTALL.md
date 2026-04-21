@@ -157,14 +157,80 @@ grep -q 'set -gx DOCKER_GID' ~/.config/fish/config.fish 2>/dev/null || \
 ### A.5 Launch the sandbox and the agent
 
 ```bash
-docker compose up -d mose-sandbox
-docker compose up -d mose-agent
+docker compose build mose-sandbox mose-agent
+docker compose up -d mose-sandbox mose-agent
 docker compose logs -f mose-agent
 ```
+
+`mose-agent` waits until `mose-sandbox` passes its healthcheck (`/workspace`
+exists) before starting, so a cold boot does not race into failed `docker exec`
+calls.
 
 On the first run, the agent creates its SQLite memory database under the
 `mose-data` named volume and starts either the Signal or Discord bot
 depending on what you set in `.env`.
+
+#### A.5.1 Rebuild the shell sandbox after Dockerfile changes
+
+The sandbox image is built from [`docker/sandbox/Dockerfile`](docker/sandbox/Dockerfile)
+(SRE/network tooling is installed at **image** build time; the container runs
+with `read_only: true`, so runtime `apt-get` is not available).
+
+```bash
+docker compose build mose-sandbox
+docker compose up -d --force-recreate mose-sandbox mose-agent
+```
+
+#### A.5.2 Workspace path mapping (agent vs sandbox)
+
+The same named volume `mose-workspace` is mounted at:
+
+- **`/app/data/workspace`** inside `mose-agent` (file tools and the resolved
+  workspace path on the agent)
+- **`/workspace`** inside `mose-sandbox` (where `bash` / `sre_execute` run)
+
+The agent maps agent-side paths under the workspace to `/workspace/...` inside
+the sandbox automatically. You should set `[terminal] workspace_mount =
+"/workspace"` in `config.toml` to match compose (this is the default).
+
+#### A.5.3 Reaching LAN segments (e.g. `10.4.251.0/24`)
+
+**Default (bridge + SNAT):** `mose-sandbox` stays on the compose bridge
+(`mose-net`, typically `172.18.0.0/16`). Outbound traffic to hosts on your LAN
+is forwarded and masqueraded by the Docker host. If the host has a route to
+that subnet (for example the host is `10.4.251.x/24` on `enp39s0`), the sandbox
+can reach every node on `10.4.251.0/24`; targets see the **host’s** IP as the
+source (e.g. `10.4.251.206`), not an address inside the bridge CIDR.
+
+Host sanity checks if something does not respond:
+
+```bash
+sysctl net.ipv4.ip_forward          # should be 1
+sudo iptables -t nat -S POSTROUTING | grep MASQUERADE
+ip route get 10.4.251.254           # should use the host interface on that subnet
+```
+
+Quick checks **from the host** after the stack is up:
+
+```bash
+docker compose exec mose-sandbox ping -c 2 10.4.251.254
+docker compose exec mose-sandbox curl -sS -m 5 -o /dev/null -w '%{http_code}\n' http://10.4.251.254/ || true
+docker compose exec mose-sandbox ss -ltn
+```
+
+**Optional (macvlan):** If managed nodes must see a **dedicated** source IP for
+the sandbox (firewall ACLs, inbound SSH to the sandbox, etc.), attach
+`mose-sandbox` to a `macvlan` network on your LAN parent interface and assign
+an IP from an unused slice of `10.4.251.0/24`. Caveats: reserve the range in
+DHCP/IPAM; the host usually cannot talk to its own macvlan child without an
+extra shim interface; Wi-Fi parents often do not support macvlan.
+
+**Last resort:** `network_mode: host` on the sandbox removes network isolation;
+only use if bridge + SNAT and macvlan are both unsuitable.
+
+**Capabilities:** Compose adds `cap_add: [NET_RAW]` so `ping` and `traceroute`
+work reliably with `cap_drop: ALL`. For `tcpdump` or similar, consider a
+separate compose profile that adds `NET_ADMIN` (wider privilege).
 
 ### A.6 Verify the isolation
 
@@ -310,6 +376,7 @@ non-LLM sections for an SRE deployment:
 # "docker" runs bash inside mose-sandbox via docker exec (recommended).
 backend = "docker"
 container = "mose-sandbox"
+workspace_mount = "/workspace"   # must match docker-compose volume mount
 
 [signal]
 # Group ids are normally set via SIGNAL_ENGAGEMENT_GROUP_ID / SIGNAL_ADMIN_GROUP_ID in .env

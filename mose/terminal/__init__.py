@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mose.config import TerminalConfig
 from mose.observe import get_logger, log_event
 from mose.terminal.base import TerminalBackend, TerminalResult
@@ -30,10 +32,12 @@ def init_terminal(config: TerminalConfig, workspace: str | None = None) -> None:
     backend = os.environ.get("TERMINAL_BACKEND", config.backend).lower()
 
     if backend == "docker":
+        host_ws = Path(workspace).resolve() if workspace else None
         _backend = DockerTerminalBackend(
             container_name=config.container,
             default_cwd=config.workspace_mount,
             workspace_mount=config.workspace_mount,
+            host_workspace=host_ws,
         )
         log_event(logger, "terminal_backend_init", backend="docker", container=config.container)
     elif backend == "legacy_shell":

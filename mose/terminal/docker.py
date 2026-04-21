@@ -3,11 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path, PurePosixPath
 
 from mose.observe import get_logger, log_event
 from mose.terminal.base import TerminalBackend, TerminalResult
 
 logger = get_logger("terminal.docker")
+
+
+def sandbox_workdir(
+    cwd: str | None,
+    host_workspace: Path | None,
+    mount: str,
+) -> tuple[str, bool]:
+    """Map agent-side cwd to a path inside the sandbox container.
+
+    Returns ``(workdir, used_fallback)``. When ``cwd`` is outside ``host_workspace``,
+    returns ``mount`` and ``used_fallback=True`` (caller should log).
+    """
+    mount_norm = mount.rstrip("/") or "/"
+    if cwd is None:
+        return mount_norm, False
+    p = Path(cwd).resolve()
+    if host_workspace is None:
+        return mount_norm, False
+    hw = host_workspace.resolve()
+    try:
+        rel = p.relative_to(hw)
+    except ValueError:
+        return mount_norm, True
+    if rel == Path("."):
+        return mount_norm, False
+    return str(PurePosixPath(mount_norm) / PurePosixPath(rel.as_posix())), False
 
 
 class DockerTerminalBackend(TerminalBackend):
@@ -18,10 +45,12 @@ class DockerTerminalBackend(TerminalBackend):
         container_name: str,
         default_cwd: str | None = None,
         workspace_mount: str = "/workspace",
+        host_workspace: Path | None = None,
     ) -> None:
         self._container_name = container_name
         self._default_cwd = default_cwd or workspace_mount
         self._workspace_mount = workspace_mount
+        self._host_workspace = host_workspace.resolve() if host_workspace is not None else None
         self._client: docker.DockerClient | None = None
 
     def _get_client(self):
@@ -32,7 +61,18 @@ class DockerTerminalBackend(TerminalBackend):
         return self._client
 
     async def run(self, command: str, timeout: int, cwd: str | None) -> TerminalResult:
-        workdir = cwd or self._default_cwd
+        if cwd is None:
+            workdir = self._default_cwd
+        else:
+            workdir, fallback = sandbox_workdir(cwd, self._host_workspace, self._workspace_mount)
+            if fallback:
+                log_event(
+                    logger,
+                    "docker_workdir_fallback",
+                    cwd=cwd,
+                    mount=self._workspace_mount,
+                    host_workspace=str(self._host_workspace) if self._host_workspace else "",
+                )
 
         def _exec() -> TerminalResult:
             try:

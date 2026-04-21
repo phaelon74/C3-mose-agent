@@ -118,15 +118,13 @@ class AgentConfig:
 
 @dataclass
 class TerminalConfig:
-    """Where shell tools run: local bash argv, or docker exec into a sandbox container."""
+    """Where shell tools run: local bash argv, or docker exec into a sandbox container.
+
+    Sandbox image, capabilities, and networks are defined in docker-compose.yml, not here.
+    """
 
     backend: str = "local"  # local | docker | legacy_shell
     container: str = "mose-sandbox"
-    image: str = "ubuntu:24.04"
-    network: str = "none"
-    read_only_rootfs: bool = True
-    cap_drop: list[str] = field(default_factory=lambda: ["ALL"])
-    timeout_default: int = 60
     workspace_mount: str = "/workspace"
 
 

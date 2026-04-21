@@ -9,7 +9,7 @@
 #
 # Bring up:
 #   export DOCKER_GID=$(getent group docker | cut -d: -f3)
-#   docker compose build
+#   docker compose build mose-sandbox mose-agent
 #   docker compose up -d mose-sandbox mose-agent
 #
 # Periodic skill review (run from a systemd timer on the host):
@@ -19,9 +19,10 @@ services:
   # Isolated shell target. The agent `exec`s into this container instead of
   # running shell commands directly inside its own container.
   mose-sandbox:
-    image: ubuntu:24.04
+    build:
+      context: .
+      dockerfile: docker/sandbox/Dockerfile
     container_name: mose-sandbox
-    command: ["sleep", "infinity"]
     read_only: true
     tmpfs:
       - /tmp
@@ -29,10 +30,19 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - NET_RAW
     networks:
       - mose-net
     volumes:
       - mose-workspace:/workspace
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "test -d /workspace"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
 
   # Main agent. Runs as the non-root `mose` user inside the image.
   mose-agent:
@@ -42,7 +52,8 @@ services:
         DOCKER_GID: ${DOCKER_GID:-999}
     container_name: mose-agent
     depends_on:
-      - mose-sandbox
+      mose-sandbox:
+        condition: service_healthy
     environment:
       TERMINAL_BACKEND: docker
       LLM_ENDPOINT: ${LLM_ENDPOINT:-http://host.docker.internal:5000/v1}
@@ -80,7 +91,8 @@ services:
         DOCKER_GID: ${DOCKER_GID:-999}
     profiles: ["review"]
     depends_on:
-      - mose-sandbox
+      mose-sandbox:
+        condition: service_healthy
     environment:
       TERMINAL_BACKEND: docker
       LLM_ENDPOINT: ${LLM_ENDPOINT:-http://host.docker.internal:5000/v1}
