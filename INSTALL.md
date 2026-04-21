@@ -1,4 +1,4 @@
-﻿# Installation Guide
+# Installation Guide
 
 Complete setup instructions for the Mose SRE/DevOps agent on a **Linux Docker
 host**. Windows hosts are intentionally not supported — the agent is developed
@@ -72,10 +72,14 @@ Edit `.env` and set the interface(s) you want. For a Signal-first SRE
 deployment, set:
 
 ```bash
-# LLM endpoint (TabbyAPI, vLLM, llama.cpp server — any OpenAI-compatible API)
+# LLM (TabbyAPI, vLLM, llama.cpp server — any OpenAI-compatible API)
 LLM_ENDPOINT=http://host.docker.internal:5000/v1
 LLM_MODEL=your-served-model-name
+LLM_MAX_TOKENS=16384
+LLM_TEMPERATURE=1.0
+LLM_CONTEXT_WINDOW=98304
 LLM_API_KEY=your-tabby-or-vllm-bearer-token   # empty string allowed for local vLLM
+LLM_PROVIDER=openai_compat   # openai_compat | tabby | vllm | bedrock
 
 # Signal interface (see Section E)
 SIGNAL_PHONE=+15551234567        # the phone number linked to signal-cli
@@ -215,9 +219,10 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Fill in `LLM_ENDPOINT`, `LLM_API_KEY` (if applicable), `SIGNAL_PHONE`,
-`SIGNAL_ADMIN`, and any other interface tokens you need. Adjust
-`config.toml` if the defaults don't match your hardware.
+Fill in the `LLM_*` variables (at minimum `LLM_ENDPOINT` and `LLM_MODEL`),
+`LLM_API_KEY` if applicable, `SIGNAL_PHONE`, `SIGNAL_ADMIN`, and any other
+interface tokens you need. Adjust `config.toml` for non-LLM options if the
+defaults don't match your hardware.
 
 ### B.8 Install systemd units
 
@@ -247,16 +252,11 @@ journalctl -u mose-skill-review -n 200
 
 ## C. Configuration reference
 
-All values live in `config.toml`. The most relevant sections for an SRE
-deployment:
+LLM-related settings are set via **environment variables** (`LLM_*` in `.env`;
+see section A.3). Other values live in `config.toml`. The most relevant
+non-LLM sections for an SRE deployment:
 
 ```toml
-[llm]
-endpoint = "http://host.docker.internal:5000/v1"  # TabbyAPI example
-model = "your-model-name"
-max_tokens = 16384
-context_window = 98304
-
 [terminal]
 # "local" runs bash on the same machine as the agent.
 # "docker" runs bash inside mose-sandbox via docker exec (recommended).
@@ -289,9 +289,10 @@ build_grace_window_seconds = 900         # 15 minutes
 ```
 
 Environment variables that override the file:
-`DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ADMIN`, `LLM_ENDPOINT`, `LLM_MODEL`,
-`LLM_API_KEY`, `LLM_PROVIDER`, `LLM_CONTEXT_WINDOW`, `MEMORY_DB_PATH`,
-`LOG_DIR`, `TERMINAL_BACKEND`.
+`DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ADMIN`,
+`LLM_ENDPOINT`, `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`,
+`LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`,
+`MEMORY_DB_PATH`, `LOG_DIR`, `TERMINAL_BACKEND`.
 
 ---
 

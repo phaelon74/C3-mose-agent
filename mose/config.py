@@ -172,8 +172,12 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.endpoint = endpoint
     if model := os.environ.get("LLM_MODEL"):
         cfg.llm.model = model
-    if ctx := os.environ.get("LLM_CONTEXT_WINDOW"):
+    if (ctx := os.environ.get("LLM_CONTEXT_WINDOW")) is not None and str(ctx).strip() != "":
         cfg.llm.context_window = int(ctx)
+    if (mt := os.environ.get("LLM_MAX_TOKENS")) is not None and str(mt).strip() != "":
+        cfg.llm.max_tokens = int(mt)
+    if (temp := os.environ.get("LLM_TEMPERATURE")) is not None and str(temp).strip() != "":
+        cfg.llm.temperature = float(temp)
     if db_path := os.environ.get("MEMORY_DB_PATH"):
         cfg.memory.db_path = db_path
     if log_dir := os.environ.get("LOG_DIR"):

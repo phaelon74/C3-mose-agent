@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="assets/logo.svg" alt="Mose Agent" width="120" height="120">
 </p>
 
@@ -115,17 +115,25 @@ mose-agent/
 
 ## Configuration
 
-All settings live in `config.toml`. Environment variables override for secrets:
+Most settings live in `config.toml`. **LLM** options are intended to be set via
+environment variables (see table). Other env vars override `config.toml` for
+secrets and paths:
 
-| Env Var | Overrides | Required |
-|---------|-----------|----------|
+| Env Var | Purpose | Required |
+|---------|---------|----------|
 | `DISCORD_TOKEN` | Discord bot token | Yes (for Discord) |
-| `LLM_ENDPOINT` | `[llm] endpoint` | No |
-| `LLM_MODEL` | `[llm] model` | No |
+| `LLM_ENDPOINT` | OpenAI-compatible API base URL (e.g. `http://localhost:5000/v1`) | No |
+| `LLM_MODEL` | Model id passed to the API | No |
+| `LLM_MAX_TOKENS` | Max completion tokens | No |
+| `LLM_TEMPERATURE` | Sampling temperature | No |
+| `LLM_CONTEXT_WINDOW` | Context length hint for the agent | No |
+| `LLM_API_KEY` | Bearer token if the server requires auth | No |
+| `LLM_PROVIDER` | `openai_compat`, `tabby`, `vllm`, or `bedrock` | No |
 | `MEMORY_DB_PATH` | `[memory] db_path` | No |
 | `LOG_DIR` | `[observe] log_dir` | No |
 
-See `config.toml` for all available settings and their defaults.
+Defaults for LLM (and all sections) are defined in `mose/config.py` when an env
+var is unset. See `config.toml` for non-LLM settings.
 
 ## Components
 

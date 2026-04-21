@@ -1,9 +1,8 @@
 [llm]
-endpoint = "http://localhost:8001/v1"
-model = "QuantTrio/Qwen3.5-27B-AWQ"
-max_tokens = 16384
-temperature = 1.0
-context_window = 98304
+# LLM settings are supplied via environment variables (not this file):
+# LLM_ENDPOINT, LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE,
+# LLM_CONTEXT_WINDOW, LLM_API_KEY, LLM_PROVIDER.
+# Defaults when unset are defined in mose/config.py (LLMConfig).
 
 [discord]
 # token loaded from DISCORD_TOKEN env var
