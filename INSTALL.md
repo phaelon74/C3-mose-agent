@@ -540,6 +540,7 @@ agent's only outputs — an operator must review and action them.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `TOMLDecodeError` / `Invalid statement (at line 1, column 1)` during `docker compose build` | `pyproject.toml` in the build context is not real TOML (Git LFS pointer, UTF-16, UTF-8 BOM edge case, empty file) | On the host: `head -n3 pyproject.toml` must start with `[project]`. If you see `version https://git-lfs.github.com`, run `git lfs pull`. Re-save as UTF-8 without BOM if edited on Windows. The image runs `docker/check_pyproject.py` before `pip` to surface this. |
 | `permission denied while trying to connect to /var/run/docker.sock` inside the container | `DOCKER_GID` build arg didn't match the host group | Rebuild: `DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build` |
 | `CUDA error: no kernel image` | Driver/CUDA version mismatch | Update NVIDIA driver and reinstall vLLM for the matching CUDA toolkit |
 | `Connection refused` on port 8001 | `worker-agent` service not running | `sudo systemctl start worker-agent` and inspect `journalctl -u worker-agent` |

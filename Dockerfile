@@ -27,6 +27,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY . .
 
+# Fail fast with actionable errors if pyproject.toml is a BOM/LFS pointer/UTF-16 style corrupt file.
+RUN python3 docker/check_pyproject.py
+
 RUN pip install --no-cache-dir -e ".[dev]" \
     && groupadd -g ${APP_GID} mose \
     && useradd -m -u ${APP_UID} -g ${APP_GID} -s /bin/bash mose \
