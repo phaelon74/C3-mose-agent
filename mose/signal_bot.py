@@ -46,9 +46,9 @@ async def _signal_skill_propose_callback(
     if bot is None:
         logger.warning("signal_skill_propose_no_bot", extra={"slug": slug})
         return
-    admin = bot.config.admin_recipient
-    if not admin:
-        logger.warning("signal_skill_propose_no_admin", extra={"slug": slug})
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        logger.warning("signal_skill_propose_no_admin_group", extra={"slug": slug})
         return
 
     prompt = (
@@ -65,7 +65,7 @@ async def _signal_skill_propose_callback(
         f"'yes' / 'no' also works when exactly one proposal is pending."
     )
     try:
-        await bot._send_message(admin, prompt)
+        await bot._send_message(admin_gid, prompt)
     except Exception:
         logger.exception("signal_skill_propose_send_failed", extra={"slug": slug})
 
@@ -77,8 +77,8 @@ async def _signal_skill_reminder_callback(
     bot = _active_bot
     if bot is None:
         return
-    admin = bot.config.admin_recipient
-    if not admin:
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
         return
     msg = (
         "Reminder: skill proposal still pending\n\n"
@@ -89,7 +89,7 @@ async def _signal_skill_reminder_callback(
         f"Reply 'approve {slug}' to build, 'reject {slug}' to discard."
     )
     try:
-        await bot._send_message(admin, msg)
+        await bot._send_message(admin_gid, msg)
     except Exception:
         logger.exception("signal_skill_reminder_send_failed", extra={"slug": slug})
 
@@ -116,8 +116,8 @@ async def _signal_skill_recovery_notice(
     bot = _active_bot
     if bot is None:
         return
-    admin = bot.config.admin_recipient
-    if not admin:
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
         return
 
     def _title_of(row: Any) -> str:
@@ -169,7 +169,7 @@ async def _signal_skill_recovery_notice(
             )
 
     try:
-        await bot._send_message(admin, "\n".join(lines))
+        await bot._send_message(admin_gid, "\n".join(lines))
     except Exception:
         logger.exception(
             "signal_skill_recovery_send_failed",
@@ -186,11 +186,11 @@ async def _signal_skill_review_notify(report_path: str, summary: str) -> None:
     bot = _active_bot
     if bot is None:
         return
-    admin = bot.config.admin_recipient
-    if not admin:
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
         return
     await bot._send_message(
-        admin,
+        admin_gid,
         "Skill Review Report\n\n"
         f"{summary}\n\n"
         f"Full report on disk: {report_path}\n"
@@ -239,8 +239,8 @@ def _parse_approval_reply(
     return None, action
 
 
-async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: str) -> bool:
-    """If ``text`` looks like a skill-approval reply from the admin, apply it.
+async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text: str) -> bool:
+    """If ``text`` looks like a skill-approval reply in the admin group, apply it.
 
     Understands three action verbs:
 
@@ -252,7 +252,8 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: 
     Returns True if the message was consumed (and should NOT be routed to
     the agent), False otherwise.
     """
-    if source != bot.config.admin_recipient:
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not group_id or group_id != admin_gid:
         return False
     slug, action = _parse_approval_reply(text)
     if action is None:
@@ -268,7 +269,7 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: 
             approved = memory.list_approved_approvals(kind="skill_proposal")
             if len(approved) != 1:
                 await bot._send_message(
-                    source,
+                    admin_gid,
                     f"{len(approved)} skills in their grace window; please include "
                     f"the slug (e.g. 'stop my-skill').",
                 )
@@ -276,10 +277,10 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: 
             slug = approved[0].slug
         ok = await bot.agent.cancel_approved_build(slug)
         if ok:
-            await bot._send_message(source, f"Skill build for '{slug}' cancelled.")
+            await bot._send_message(admin_gid, f"Skill build for '{slug}' cancelled.")
         else:
             await bot._send_message(
-                source,
+                admin_gid,
                 f"No approved-but-unbuilt skill found for '{slug}' "
                 "(already built, already cancelled, or unknown slug).",
             )
@@ -290,11 +291,11 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: 
         if memory is None:
             return False
         pending = memory.list_pending_approvals(
-            kind="skill_proposal", recipient=source,
+            kind="skill_proposal", recipient=admin_gid,
         )
         if len(pending) != 1:
             await bot._send_message(
-                source,
+                admin_gid,
                 f"{len(pending)} skill proposals pending; please include the slug "
                 f"(e.g. 'approve my-skill').",
             )
@@ -306,27 +307,32 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", source: str, text: 
     applied = await handle_skill_decision(slug, approved=approved)
     if applied:
         verb = "approved — building now" if approved else "rejected"
-        await bot._send_message(source, f"Skill '{slug}' {verb}.")
+        await bot._send_message(admin_gid, f"Skill '{slug}' {verb}.")
     else:
         await bot._send_message(
-            source, f"No pending proposal found for '{slug}' (already decided or expired)."
+            admin_gid, f"No pending proposal found for '{slug}' (already decided or expired)."
         )
     return True
 
 
-def set_approval_context(sender: str, bot: "MoseSignalBot") -> None:
-    """Set context for sre_execute approval (sender phone, bot)."""
-    _approval_ctx.set({"sender": sender, "bot": bot})
+def set_approval_context(incoming_group_id: str, bot: "MoseSignalBot") -> None:
+    """Set context for sre_execute approval (incoming Signal group id, bot)."""
+    _approval_ctx.set({"incoming_group_id": incoming_group_id, "bot": bot})
 
 
 async def _signal_approval_callback(command: str, reason: str, target_system: str) -> bool:
-    """Prompt user for approval via Signal message. Waits for reply (y/yes/approve) within 60s."""
+    """Prompt admin group for approval. Waits for reply (y/yes/approve) within 60s."""
     ctx = _approval_ctx.get()
     if not ctx:
         return False
-    sender = ctx.get("sender")
+    incoming = ctx.get("incoming_group_id")
     bot = ctx.get("bot")
-    if not sender or not bot:
+    if not incoming or not bot:
+        return False
+
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    eng_gid = (bot.config.engagement_group_id or "").strip()
+    if not admin_gid:
         return False
 
     prompt = (
@@ -336,29 +342,46 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
         f"Command: {command[:500]}{'...' if len(command) > 500 else ''}\n\n"
         f"Reply with 'y', 'yes', or 'approve' within 60 seconds."
     )
-    await bot._send_message(sender, prompt)
+    await bot._send_message(admin_gid, prompt)
+
+    if eng_gid and incoming == eng_gid and eng_gid != admin_gid:
+        try:
+            await bot._send_message(
+                eng_gid,
+                "Awaiting admin approval in the admin channel…",
+            )
+        except Exception:
+            logger.exception("signal_sre_execute_engagement_notice_failed")
 
     future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-    bot._pending_approval[sender] = future
+    bot._pending_approval[admin_gid] = future
 
     try:
         approved = await asyncio.wait_for(future, 60)
     except asyncio.TimeoutError:
-        await bot._send_message(sender, "Approval timed out. Execution denied.")
+        await bot._send_message(admin_gid, "Approval timed out. Execution denied.")
         approved = False
     finally:
-        bot._pending_approval.pop(sender, None)
+        bot._pending_approval.pop(admin_gid, None)
 
     if not approved:
-        await bot._send_message(sender, "Execution denied.")
+        await bot._send_message(admin_gid, "Execution denied.")
     return approved
 
 
-def _session_id_for(source_number: str) -> str:
-    """Derive a session ID from the sender phone number."""
-    normalized = source_number.strip().replace(" ", "")
-    h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-    return f"signal-{h}"
+def _normalize_group_id(group_id: str | None) -> str | None:
+    if group_id is None or not isinstance(group_id, str):
+        return None
+    s = group_id.strip()
+    return s if s else None
+
+
+def _session_id_for_signal_group(group_id: str, *, admin: bool) -> str:
+    """Stable session id from Signal group id (engagement vs admin memory split)."""
+    gid = _normalize_group_id(group_id) or ""
+    h = hashlib.sha256(gid.encode()).hexdigest()[:16]
+    prefix = "signal-grp-adm-" if admin else "signal-grp-eng-"
+    return prefix + h
 
 
 def _split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -449,6 +472,7 @@ class MoseSignalBot:
         self._rpc_id = 0
         self._rpc_pending: dict[str, asyncio.Future[dict]] = {}
         self._pending_approval: dict[str, asyncio.Future[bool]] = {}
+        self._logged_unknown_channels: set[str] = set()
         self._running = False
         # Optional zero-arg coroutine invoked once after the first successful
         # connect. Set by the launcher to run startup recovery tasks that
@@ -487,11 +511,14 @@ class MoseSignalBot:
         finally:
             self._rpc_pending.pop(req_id, None)
 
-    async def _send_message(self, recipient: str, text: str) -> None:
-        """Send a message to a recipient. Splits long messages into chunks."""
+    async def _send_message(self, group_id: str, text: str) -> None:
+        """Send a message to a Signal group via JSON-RPC (groupId only)."""
+        gid = (group_id or "").strip()
+        if not gid:
+            return
         chunks = _split_message(text)
         for chunk in chunks:
-            await self._send_rpc("send", {"recipient": [recipient], "message": chunk})
+            await self._send_rpc("send", {"groupId": gid, "message": chunk})
 
     def _handle_rpc_line(self, line: str) -> None:
         """Process one JSON-RPC line (response or notification)."""
@@ -525,9 +552,15 @@ class MoseSignalBot:
             if envelope:
                 asyncio.create_task(self._handle_message(envelope))
 
+    def _log_unknown_channel_once(self, key: str) -> None:
+        if key in self._logged_unknown_channels:
+            return
+        self._logged_unknown_channels.add(key)
+        logger.debug("signal_ignore_unknown_channel", extra={"channel": key})
+
     async def _handle_message(self, envelope: dict) -> None:
         """Process an incoming message envelope."""
-        source, message_text, group_id = _extract_message_from_envelope(envelope)
+        source, message_text, group_id_raw = _extract_message_from_envelope(envelope)
         if not source or message_text is None:
             return
 
@@ -536,30 +569,54 @@ class MoseSignalBot:
         if not content:
             return
 
-        # Check if this is an sre_execute approval reply (in-memory, 60s future)
-        if source in self._pending_approval:
-            future = self._pending_approval.get(source)
-            if future and not future.done():
-                approved = content.lower() in ("y", "yes", "approve")
-                future.set_result(approved)
+        eng = (self.config.engagement_group_id or "").strip()
+        adm = (self.config.admin_group_id or "").strip()
+        group_id = _normalize_group_id(group_id_raw)
+
+        if group_id is None:
+            self._log_unknown_channel_once("__dm__")
             return
 
-        # Check if this is a durable skill-proposal approval reply from the admin.
-        try:
-            if await _handle_skill_approval_reply(self, source, content):
+        if group_id not in (eng, adm):
+            self._log_unknown_channel_once(group_id)
+            return
+
+        if group_id == adm:
+            fut = self._pending_approval.get(adm)
+            if fut and not fut.done():
+                lc = content.lower().strip()
+                if lc in ("y", "yes", "approve"):
+                    fut.set_result(True)
+                    return
+                if lc in ("n", "no", "deny", "reject"):
+                    fut.set_result(False)
+                    return
+            try:
+                if await _handle_skill_approval_reply(self, group_id, content):
+                    return
+            except Exception:
+                logger.exception("skill approval reply handling failed")
+            fut = self._pending_approval.get(adm)
+            if fut and not fut.done():
+                fut.set_result(False)
                 return
-        except Exception:
-            logger.exception("skill approval reply handling failed")
 
-        session_id = _session_id_for(source)
-        log_event(logger, "signal_message", session_id=session_id, source=source)
+        is_admin_channel = group_id == adm
+        session_id = _session_id_for_signal_group(group_id, admin=is_admin_channel)
+        log_event(
+            logger,
+            "signal_message",
+            session_id=session_id,
+            source=source,
+            group_id=group_id,
+        )
 
-        set_approval_context(source, self)
+        set_approval_context(group_id, self)
 
         async def _send_status(tool_name: str, arguments: str) -> None:
             status = _format_status(tool_name, arguments)
             try:
-                await self._send_message(source, status)
+                await self._send_message(group_id, status)
             except Exception:
                 pass
 
@@ -571,7 +628,7 @@ class MoseSignalBot:
 
         chunks = _split_message(response)
         for chunk in chunks:
-            await self._send_message(source, chunk)
+            await self._send_message(group_id, chunk)
 
     async def _reader_loop(self) -> None:
         """Read JSON-RPC lines from the stream and dispatch them."""

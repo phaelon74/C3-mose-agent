@@ -4,7 +4,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=Mose
+User=mose
+# -a is the linked Signal account identity only. Mose sends/receives on groups
+# configured in .env (SIGNAL_ENGAGEMENT_GROUP_ID, SIGNAL_ADMIN_GROUP_ID).
 # Edit ExecStart: replace +YOUR_PHONE_NUMBER with your linked Signal number (e.g. +1234567890)
 ExecStart=/opt/signal-cli/bin/signal-cli -a +YOUR_PHONE_NUMBER daemon --tcp=127.0.0.1:7583
 Restart=always

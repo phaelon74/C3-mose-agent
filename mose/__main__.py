@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from mose.config import load_config
+from mose.config import assert_signal_account_requires_groups, load_config, signal_runtime_ready
 from mose.observe import setup_logging, get_logger, log_event
 from mose.llm import create_llm_client
 from mose.memory import MemoryManager
@@ -278,7 +278,7 @@ async def _run_sweep_once(config) -> int:
     init_skills_dir(config.agent.skills_path)
 
     # Wire only the reminder channel that fits this run.
-    if config.signal.phone_number:
+    if signal_runtime_ready(config.signal):
         from mose.signal_bot import _signal_skill_reminder_callback
         init_skill_reminder(_signal_skill_reminder_callback)
     else:
@@ -311,7 +311,7 @@ async def _run_skill_review_once(config, *, notify: bool) -> int:
     init_tool_registry(mcp)
 
     # Register notify target (Signal if configured, else CLI stdout) before building Agent.
-    if notify and config.signal.phone_number:
+    if notify and signal_runtime_ready(config.signal):
         from mose.signal_bot import _signal_skill_review_notify
         init_skill_review(_signal_skill_review_notify)
     else:
@@ -333,6 +333,7 @@ async def _run_skill_review_once(config, *, notify: bool) -> int:
 async def main() -> None:
     args = _parse_args(sys.argv[1:])
     config = load_config()
+    assert_signal_account_requires_groups(config.signal)
 
     # Set up logging first
     setup_logging(config.observe.log_dir, config.observe.log_level)
@@ -371,7 +372,7 @@ async def main() -> None:
     init_tool_registry(mcp)
 
     # Choose mode: Signal > Discord > CLI
-    if config.signal.phone_number:
+    if signal_runtime_ready(config.signal):
         from mose.signal_bot import (
             MoseSignalBot,
             _signal_approval_callback,

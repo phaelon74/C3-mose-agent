@@ -55,7 +55,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       DISCORD_TOKEN: ${DISCORD_TOKEN:-}
       SIGNAL_PHONE: ${SIGNAL_PHONE:-}
-      SIGNAL_ADMIN: ${SIGNAL_ADMIN:-}
+      SIGNAL_ENGAGEMENT_GROUP_ID: ${SIGNAL_ENGAGEMENT_GROUP_ID:-}
+      SIGNAL_ADMIN_GROUP_ID: ${SIGNAL_ADMIN_GROUP_ID:-}
     # extra_hosts maps host.docker.internal on Linux (native on macOS/Windows).
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -91,7 +92,8 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       SIGNAL_PHONE: ${SIGNAL_PHONE:-}
-      SIGNAL_ADMIN: ${SIGNAL_ADMIN:-}
+      SIGNAL_ENGAGEMENT_GROUP_ID: ${SIGNAL_ENGAGEMENT_GROUP_ID:-}
+      SIGNAL_ADMIN_GROUP_ID: ${SIGNAL_ADMIN_GROUP_ID:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -50,14 +50,41 @@ class DiscordConfig:
 
 @dataclass
 class SignalConfig:
+    # Linked device account (signal-cli -a +...). Not a message destination.
     phone_number: str = ""
     daemon_host: str = "127.0.0.1"
     daemon_port: int = 7583
-    # Proactive messages (skill proposals, skill review summaries, alerts) are
-    # sent to this recipient. If unset, proactive notifications are skipped.
-    admin_recipient: str = ""
+    # Base64 group ids from signal-cli listGroups / JSON-RPC listGroups.
+    engagement_group_id: str = ""
+    admin_group_id: str = ""
     # Seconds to wait for a human response on a skill proposal (12 hours).
     proposal_timeout_seconds: int = 43200
+
+
+def signal_runtime_ready(signal: SignalConfig) -> bool:
+    """True when the Signal bot should run: linked account plus both group ids."""
+    return bool(
+        (signal.phone_number or "").strip()
+        and (signal.engagement_group_id or "").strip()
+        and (signal.admin_group_id or "").strip()
+    )
+
+
+def assert_signal_account_requires_groups(signal: SignalConfig) -> None:
+    """Exit non-zero if SIGNAL_PHONE is set but group ids are incomplete."""
+    import sys
+
+    phone = (signal.phone_number or "").strip()
+    eng = (signal.engagement_group_id or "").strip()
+    adm = (signal.admin_group_id or "").strip()
+    if phone and (not eng or not adm):
+        print(
+            "Signal is misconfigured: SIGNAL_PHONE is set but SIGNAL_ENGAGEMENT_GROUP_ID "
+            "and/or SIGNAL_ADMIN_GROUP_ID is missing.\n"
+            "See INSTALL.md section E (Signal bot setup).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 @dataclass
@@ -182,9 +209,11 @@ def load_config(config_path: Path | None = None) -> Config:
     if token := os.environ.get("DISCORD_TOKEN"):
         cfg.discord.token = token
     if phone := os.environ.get("SIGNAL_PHONE"):
-        cfg.signal.phone_number = phone
-    if admin := os.environ.get("SIGNAL_ADMIN"):
-        cfg.signal.admin_recipient = admin
+        cfg.signal.phone_number = phone.strip()
+    if gid := os.environ.get("SIGNAL_ENGAGEMENT_GROUP_ID"):
+        cfg.signal.engagement_group_id = gid.strip()
+    if gid := os.environ.get("SIGNAL_ADMIN_GROUP_ID"):
+        cfg.signal.admin_group_id = gid.strip()
     if endpoint := os.environ.get("LLM_ENDPOINT"):
         cfg.llm.endpoint = endpoint
     if model := os.environ.get("LLM_MODEL"):
@@ -205,6 +234,10 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.provider = provider
     if (omit_temp := _env_optional_bool("LLM_OMIT_TEMPERATURE")) is not None:
         cfg.llm.omit_temperature = omit_temp
+
+    cfg.signal.phone_number = (cfg.signal.phone_number or "").strip()
+    cfg.signal.engagement_group_id = (cfg.signal.engagement_group_id or "").strip()
+    cfg.signal.admin_group_id = (cfg.signal.admin_group_id or "").strip()
 
     # Resolve relative paths against project root
     if not Path(cfg.memory.db_path).is_absolute():

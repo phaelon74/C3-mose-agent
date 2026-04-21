@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mose.config import load_config
+from mose.config import load_config, signal_runtime_ready
 
 
 def test_llm_env_overrides_when_config_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -65,3 +65,28 @@ def test_llm_env_empty_string_skips_override(monkeypatch: pytest.MonkeyPatch, tm
     assert cfg.llm.max_tokens == 100
     assert cfg.llm.temperature == 0.5
     assert cfg.llm.context_window == 200
+
+
+def test_signal_group_env_strips_whitespace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing = tmp_path / "no_config.toml"
+    monkeypatch.setenv("SIGNAL_PHONE", " +15550001111 ")
+    monkeypatch.setenv("SIGNAL_ENGAGEMENT_GROUP_ID", " engid ")
+    monkeypatch.setenv("SIGNAL_ADMIN_GROUP_ID", " admid ")
+
+    cfg = load_config(missing)
+
+    assert cfg.signal.phone_number == "+15550001111"
+    assert cfg.signal.engagement_group_id == "engid"
+    assert cfg.signal.admin_group_id == "admid"
+    assert signal_runtime_ready(cfg.signal) is True
+
+
+def test_signal_runtime_ready_false_when_incomplete(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing = tmp_path / "no_config.toml"
+    monkeypatch.setenv("SIGNAL_PHONE", "+1")
+    monkeypatch.delenv("SIGNAL_ENGAGEMENT_GROUP_ID", raising=False)
+    monkeypatch.delenv("SIGNAL_ADMIN_GROUP_ID", raising=False)
+
+    cfg = load_config(missing)
+
+    assert signal_runtime_ready(cfg.signal) is False

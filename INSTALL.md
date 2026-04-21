@@ -82,9 +82,10 @@ LLM_CONTEXT_WINDOW=98304
 LLM_API_KEY=your-tabby-or-vllm-bearer-token   # empty string allowed for local vLLM
 LLM_PROVIDER=openai_compat   # openai_compat | tabby | vllm | bedrock
 
-# Signal interface (see Section E)
-SIGNAL_PHONE=+15551234567        # the phone number linked to signal-cli
-SIGNAL_ADMIN=+15559876543        # where proactive messages (skill proposals, review summaries) go
+# Signal (see Section E): linked account + two group base64 ids from listGroups
+SIGNAL_PHONE=+15551234567
+SIGNAL_ENGAGEMENT_GROUP_ID=<base64-from-listGroups>
+SIGNAL_ADMIN_GROUP_ID=<base64-from-listGroups>
 
 # Or: Discord, if you prefer that interface (no skill-proposal UX in Discord)
 DISCORD_TOKEN=your-discord-bot-token
@@ -266,7 +267,8 @@ chmod 600 .env
 ```
 
 Fill in the `LLM_*` variables (at minimum `LLM_ENDPOINT` and `LLM_MODEL`),
-`LLM_API_KEY` if applicable, `SIGNAL_PHONE`, `SIGNAL_ADMIN`, and any other
+`LLM_API_KEY` if applicable, `SIGNAL_PHONE`, `SIGNAL_ENGAGEMENT_GROUP_ID`,
+`SIGNAL_ADMIN_GROUP_ID`, and any other
 interface tokens you need. Adjust `config.toml` for non-LLM options if the
 defaults don't match your hardware.
 
@@ -310,6 +312,7 @@ backend = "docker"
 container = "mose-sandbox"
 
 [signal]
+# Group ids are normally set via SIGNAL_ENGAGEMENT_GROUP_ID / SIGNAL_ADMIN_GROUP_ID in .env
 daemon_host = "127.0.0.1"
 daemon_port = 7583
 proposal_timeout_seconds = 43200   # 12 hours
@@ -335,7 +338,7 @@ build_grace_window_seconds = 900         # 15 minutes
 ```
 
 Environment variables that override the file:
-`DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ADMIN`,
+`DISCORD_TOKEN`, `SIGNAL_PHONE`, `SIGNAL_ENGAGEMENT_GROUP_ID`, `SIGNAL_ADMIN_GROUP_ID`,
 `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`,
 `LLM_OMIT_TEMPERATURE`, `LLM_CONTEXT_WINDOW`, `LLM_API_KEY`, `LLM_PROVIDER`,
 `MEMORY_DB_PATH`, `LOG_DIR`, `TERMINAL_BACKEND`.
@@ -386,17 +389,51 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now signal-cli-daemon
 ```
 
-### E.4 Wire the agent
+### E.4 Create two Signal groups and collect group ids
 
-Set both `SIGNAL_PHONE` (the linked device number) and `SIGNAL_ADMIN` (where
-proactive messages are sent — typically your personal number) in `.env`:
+Mose listens and sends **only** on two Signal groups (no DM delivery):
+
+1. **Engagement group** — day-to-day chat with the agent; tool status lines
+   post here.
+2. **Admin group** — skill proposals, reminders, restart recovery, skill-review
+   summaries, and `sre_execute` approval prompts. Approve/reject replies must
+   be sent **in this group** (the sender’s phone number is not used for routing).
+
+Add the **linked device** (the account you registered with `signal-cli link`) as
+a member of **both** groups from a primary Signal client.
+
+Obtain each group’s **base64 `id`** (not the invite link):
+
+```bash
+# With the daemon running (E.3), one line per request; example using bash TCP:
+{ echo '{"jsonrpc":"2.0","method":"listGroups","id":1}'; sleep 1; } | nc -q1 127.0.0.1 7583
+```
+
+Or from a shell on the host as `mose`:
+
+```bash
+signal-cli -a +15551234567 listGroups --json
+```
+
+Copy the `id` field for each group into `.env`.
+
+### E.5 Wire the agent
+
+Set all three variables in `.env`. If `SIGNAL_PHONE` is set but either group id
+is missing, the agent exits with an error (half-configured Signal is rejected).
 
 ```bash
 SIGNAL_PHONE=+15551234567
-SIGNAL_ADMIN=+15559876543
+SIGNAL_ENGAGEMENT_GROUP_ID=<base64 id from listGroups>
+SIGNAL_ADMIN_GROUP_ID=<base64 id from listGroups>
 ```
 
-The admin recipient receives:
+**Migration:** older installs stored `pending_approvals.recipient` as an E.164
+phone. After switching to groups, those rows no longer match the admin group id.
+Either wait for them to expire (default proposal timeout is 12 hours), or run:
+`UPDATE pending_approvals SET recipient='<SIGNAL_ADMIN_GROUP_ID>' WHERE status='pending';`
+
+The admin group receives:
 
 - **Skill proposals** — the agent asks "may I build this skill?" and stores a
   durable `pending_approvals` row in SQLite with a default **12 hour** expiry.
@@ -414,7 +451,7 @@ The admin recipient receives:
   pointer to the full Markdown report under `data/logs/skill-review-*.md`.
 
 The agent never builds, edits, or deletes a skill without an explicit
-approval reply from the admin.
+approval reply in the **admin group**.
 
 ### Durability across restarts
 
@@ -547,7 +584,7 @@ agent's only outputs — an operator must review and action them.
 | `ModuleNotFoundError` | venv not activated / lockfile not synced | `source .venv/bin/activate && uv sync` (or `pip install -e ".[dev]"`) |
 | Empty LLM responses | Model still loading | Wait for the LLM server to report ready |
 | Signal bot won't connect | `signal-cli-daemon` down or not linked | `systemctl status signal-cli-daemon`; re-link if needed |
-| Skill proposals never arrive on Signal | `SIGNAL_ADMIN` not set or admin number wrong | Set `SIGNAL_ADMIN` in `.env` and restart the agent |
+| Skill proposals never arrive on Signal | Group ids wrong or bot not in admin group | Set `SIGNAL_ADMIN_GROUP_ID`, add the linked device to that group, restart the agent |
 | Skill review timer never fires | Timer not enabled | `sudo systemctl enable --now mose-skill-review.timer && systemctl list-timers 'mose-*'` |
 
 ---

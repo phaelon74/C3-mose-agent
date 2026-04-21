@@ -442,7 +442,7 @@ class Agent:
                     had_tool_error,
                     self.llm,
                     memory=self.memory,
-                    recipient=self.config.signal.admin_recipient,
+                    recipient=self.config.signal.admin_group_id,
                 )
             except Exception:
                 logger.exception("Skill proposal failed")

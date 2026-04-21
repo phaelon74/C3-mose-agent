@@ -8,9 +8,9 @@
 # token loaded from DISCORD_TOKEN env var
 
 [signal]
-# phone_number loaded from SIGNAL_PHONE env var
-# admin_recipient loaded from SIGNAL_ADMIN env var (where proactive
-# skill-proposal and skill-review messages are sent)
+# phone_number: linked account (SIGNAL_PHONE) — signal-cli -a; not a chat destination.
+# engagement_group_id / admin_group_id: base64 group ids (SIGNAL_ENGAGEMENT_GROUP_ID,
+# SIGNAL_ADMIN_GROUP_ID). See INSTALL.md section E.
 daemon_host = "127.0.0.1"
 daemon_port = 7583
 proposal_timeout_seconds = 43200   # 12 hours
