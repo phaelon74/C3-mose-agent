@@ -471,7 +471,8 @@ class MemoryManager:
         """Vector similarity search, returns (id, distance) pairs."""
         embedding = self._embed(query)
         rows = self.db.execute(
-            "SELECT rowid, distance FROM memories_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            "SELECT rowid, distance FROM memories_vec "
+            "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (json.dumps(embedding), limit),
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
