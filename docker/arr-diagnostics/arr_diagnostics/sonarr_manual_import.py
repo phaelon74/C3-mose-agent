@@ -8,6 +8,7 @@ used elsewhere returns **405** on stock Sonarr builds.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from arr_diagnostics.client import ArrClient
@@ -51,7 +52,16 @@ def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
         return json.dumps({"error": "episodeIds_must_be_non_empty_list"})
     sid = int(series_id)
     eids = [int(x) for x in episode_ids]
-    prep = _prepare_row(c, str(download_id), sid, eids[0])
+    season_num = payload_dict.get("seasonNumber")
+    episode_num = payload_dict.get("episodeNumber")
+    prep = _prepare_row(
+        c,
+        str(download_id),
+        sid,
+        eids[0],
+        season_number=int(season_num) if season_num is not None else None,
+        episode_number=int(episode_num) if episode_num is not None else None,
+    )
     if isinstance(prep, str):
         return prep
     _rows, reprocess = prep
@@ -63,9 +73,19 @@ def prepare_manual_import_payload(
     download_id: str,
     series_id: int,
     episode_id: int,
+    *,
+    season_number: int | None = None,
+    episode_number: int | None = None,
 ) -> tuple[list[Any], dict[str, Any]] | str:
     """Return ``(manualimport GET rows, single POST body element)`` or error JSON string."""
-    return _prepare_row(c, download_id, series_id, episode_id)
+    return _prepare_row(
+        c,
+        download_id,
+        series_id,
+        episode_id,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
 
 
 def _prepare_row(
@@ -73,24 +93,44 @@ def _prepare_row(
     download_id: str,
     series_id: int,
     episode_id: int,
+    *,
+    season_number: int | None = None,
+    episode_number: int | None = None,
 ) -> tuple[list[Any], dict[str, Any]] | str:
-    rows_any = c.get_json(
-        "/manualimport",
-        {"downloadId": download_id, "seriesId": series_id},
-    )
+    params: dict[str, Any] = {"downloadId": download_id, "seriesId": series_id}
+    if season_number is not None:
+        params["seasonNumber"] = season_number
+    rows_any = c.get_json("/manualimport", params)
     if not rows_any:
         return json.dumps({
             "error": "manualimport_get_empty",
             "hint": "Nothing returned for this downloadId/seriesId — release may have left the queue.",
         })
     rows = rows_any if isinstance(rows_any, list) else [rows_any]
-    row = _pick_manual_row(rows, series_id, episode_id)
+    row = _pick_manual_row(
+        rows,
+        series_id,
+        episode_id,
+        season_number=season_number,
+        episode_number=episode_number,
+    )
     if row is None:
-        return json.dumps({"error": "no_matching_manualimport_row", "candidates": len(rows)})
+        return json.dumps({
+            "error": "no_matching_manualimport_row",
+            "candidates_after_get": len(rows),
+            "hint": "Pass seasonNumber/episodeNumber (MCP payload) or use a more specific downloadId.",
+        })
     return rows, _to_reprocess(row, [episode_id])
 
 
-def _pick_manual_row(rows: list[Any], series_id: int, episode_id: int) -> dict[str, Any] | None:
+def _pick_manual_row(
+    rows: list[Any],
+    series_id: int,
+    episode_id: int,
+    *,
+    season_number: int | None,
+    episode_number: int | None,
+) -> dict[str, Any] | None:
     scoped: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -103,13 +143,42 @@ def _pick_manual_row(rows: list[Any], series_id: int, episode_id: int) -> dict[s
         scoped.append(row)
     pool = scoped or [r for r in rows if isinstance(r, dict)]
 
-    for row in pool:
+    def season_ok(row: dict[str, Any]) -> bool:
+        if season_number is None:
+            return True
+        if row.get("seasonNumber") is not None and int(row["seasonNumber"]) == season_number:
+            return True
+        for er in row.get("episodes") or []:
+            if isinstance(er, dict) and er.get("seasonNumber") == season_number:
+                return True
+        return False
+
+    narrowed = [r for r in pool if season_ok(r)] if season_number is not None else pool
+
+    # 1) Episode id appears on a nested episode (correct row for this file)
+    for row in narrowed:
         for er in row.get("episodes") or []:
             if isinstance(er, dict) and er.get("id") == episode_id:
                 return row
+
+    # 2) Path matches standard SxxEyy (release names)
+    if season_number is not None and episode_number is not None:
+        tag = rf"[Ss]{season_number:02d}[Ee]{episode_number:02d}"
+        tag_alt = rf"[Ss]{season_number}[Ee]{episode_number}\b"
+        for row in narrowed:
+            path = (row.get("path") or "") + (row.get("relativePath") or "") + (row.get("name") or "")
+            if re.search(tag, path, re.I) or re.search(tag_alt, path, re.I):
+                return row
+
+    # 3) Single candidate after season filter
+    if len(narrowed) == 1:
+        return narrowed[0]
+
+    # 4) Single candidate overall (only safe ambiguous case)
     if len(pool) == 1:
         return pool[0]
-    return pool[0] if pool else None
+
+    return None
 
 
 def _to_reprocess(row: dict[str, Any], episode_ids: list[int]) -> dict[str, Any]:
@@ -122,4 +191,10 @@ def _to_reprocess(row: dict[str, Any], episode_ids: list[int]) -> dict[str, Any]
         if isinstance(ser, dict) and ser.get("id") is not None:
             out["seriesId"] = int(ser["id"])
     out["episodeIds"] = episode_ids
+    # Drop nested episodes that are not the chosen ids (avoids posting S01E01 with episodeIds [S04E26])
+    eps = out.get("episodes")
+    if isinstance(eps, list):
+        out["episodes"] = [e for e in eps if isinstance(e, dict) and e.get("id") in episode_ids]
+        if not out["episodes"]:
+            del out["episodes"]
     return out

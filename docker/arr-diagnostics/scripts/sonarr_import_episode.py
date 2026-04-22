@@ -125,7 +125,14 @@ def main() -> None:
 
             print(f"downloadId={download_id}")
 
-            prep = prepare_manual_import_payload(client, download_id, series_id, episode_id)
+            prep = prepare_manual_import_payload(
+                client,
+                download_id,
+                series_id,
+                episode_id,
+                season_number=args.season,
+                episode_number=args.episode,
+            )
             if isinstance(prep, str):
                 print(prep, file=sys.stderr)
                 sys.exit(6)
