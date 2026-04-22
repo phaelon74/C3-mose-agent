@@ -523,8 +523,7 @@ The repository builds a small Python MCP image ([`docker/arr-diagnostics/`](dock
 with one **shared** API client and **two** stdio entrypoints: `mcp-entrypoint-sonarr` and
 `mcp-entrypoint-radarr`. They expose `sonarr_*` and `radarr_*` tools (queue, health, logs,
 manual import, history, library file reads, disk/filesystem, system, indexer and
-download-client test, **queue import** (`sonarr_post_queue_import` / `radarr_post_queue_import`
-— `POST /queue/import`; Radarr also exposes `radarr_post_manual_import` for `POST /manualimport`),
+download-client test, **manual import commit** (`sonarr_post_queue_import` — **GET+POST /manualimport**; `radarr_post_queue_import` / `radarr_post_manual_import` for Radarr),
 and a small set of `*arr` `command` names). **Write** tools
 (restart, shutdown, queue delete, `RssSync`, etc.) require the same Signal admin approval
 as other protected MCP servers (see D.6).
@@ -558,7 +557,7 @@ print(r.json())
 PY
 ```
 
-End-to-end **queue import** (matches `POST /api/v3/queue/import`; same payload shape as MCP `sonarr_post_queue_import`). Script: [`docker/arr-diagnostics/scripts/sonarr_import_episode.py`](docker/arr-diagnostics/scripts/sonarr_import_episode.py), installed in-image at **`/opt/arr-diagnostics/scripts/`**. Example for **IMPACT x Nightline S04E26**:
+End-to-end **import** (resolves `downloadId` from the queue, then **GET+POST /api/v3/manualimport** — same flow as MCP `sonarr_post_queue_import`). Script: [`docker/arr-diagnostics/scripts/sonarr_import_episode.py`](docker/arr-diagnostics/scripts/sonarr_import_episode.py), installed in-image at **`/opt/arr-diagnostics/scripts/`**. Example for **IMPACT x Nightline S04E26**:
 
 ```bash
 docker compose exec -T sonarr-diagnostics \
@@ -566,7 +565,7 @@ docker compose exec -T sonarr-diagnostics \
   --series "IMPACT x Nightline" --season 4 --episode 26
 ```
 
-Use `--dry-run` to print `seriesId`, `episodeId`, `downloadId`, and JSON payload without posting. Override import mode with `--import-mode move` if needed; add `--should-grab` only when appropriate. **Rebuild** the `sonarr-diagnostics` image after updating the repo so the script copy is fresh.
+Use `--dry-run` to print IDs and the **POST /manualimport** body without committing. **Rebuild** the `sonarr-diagnostics` image after updating the repo so the script copy is fresh.
 
 ### D.4 Optional Trakt (niavasha only)
 

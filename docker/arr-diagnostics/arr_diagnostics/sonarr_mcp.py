@@ -8,6 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from arr_diagnostics.client import ArrClient, json_response, truncate_output
+from arr_diagnostics.sonarr_manual_import import manual_import_commit
 
 SONARR_COMMANDS = frozenset({
     "ManualImport",
@@ -124,14 +125,14 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
 
     @mcp.tool()
     def sonarr_post_queue_import(payload: str) -> str:
-        """POST /queue/import — import a queued download (blocked/failed). ``payload`` is JSON as in Sonarr API (e.g. downloadId, seriesId, episodeIds, options.importMode, options.shouldGrab). Requires approval — not the same as sonarr_command_ManualImport."""
+        """Commit import for a queued/blocked release via Sonarr v3 **GET+POST /manualimport** (not ``/queue/import``, which stock Sonarr does not expose). ``payload`` JSON object: ``downloadId``, ``seriesId``, ``episodeIds`` (list). Legacy ``options`` keys are ignored. Requires approval — distinct from ``sonarr_command_ManualImport`` (background command)."""
         try:
             body = json.loads(payload)
         except json.JSONDecodeError as e:
             return json.dumps({"error": "invalid_json", "detail": str(e)})
         if not isinstance(body, dict):
             return json.dumps({"error": "payload_must_be_a_json_object"})
-        return c.post_json_documented_error("/queue/import", body)
+        return manual_import_commit(c, body)
 
     def _command_tool(name: str):
         def _run() -> str:
