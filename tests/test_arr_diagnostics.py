@@ -273,3 +273,66 @@ def test_build_apps_do_not_raise() -> None:
     finally:
         s.close()
         r.close()
+
+
+def test_safe_tool_converts_http_status_error_to_json() -> None:
+    """A tool raising ``httpx.HTTPStatusError`` must return JSON, not re-raise.
+
+    This is what keeps a single Sonarr 4xx/5xx from killing the MCP stdio
+    session and poisoning every subsequent tool call with
+    ``anyio.ClosedResourceError``.
+    """
+    import json as _json
+
+    import httpx
+
+    from arr_diagnostics.client import safe_tool
+
+    @safe_tool
+    def boom() -> str:
+        req = httpx.Request("GET", "http://x/api/v3/queue/details")
+        resp = httpx.Response(500, text="kaboom", request=req)
+        raise httpx.HTTPStatusError("500", request=req, response=resp)
+
+    out = boom()
+    parsed = _json.loads(out)
+    assert parsed["error"] == "http_error"
+    assert parsed["http_status"] == 500
+    assert parsed["tool"] == "boom"
+    assert "kaboom" in parsed["body"]
+
+
+def test_safe_tool_converts_transport_error_to_json() -> None:
+    """Connection errors (e.g. Sonarr not listening) become JSON, not a crash."""
+    import json as _json
+
+    import httpx
+
+    from arr_diagnostics.client import safe_tool
+
+    @safe_tool
+    def boom() -> str:
+        raise httpx.ConnectError("connection refused")
+
+    parsed = _json.loads(boom())
+    assert parsed["error"] == "transport_error"
+    assert "connection refused" in parsed["detail"]
+
+
+def test_safe_tool_preserves_signature_for_fastmcp_introspection() -> None:
+    """FastMCP builds tool JSON schema from the wrapped function's signature.
+
+    ``functools.wraps`` sets ``__wrapped__`` so ``inspect.signature`` (used by
+    FastMCP with ``follow_wrapped=True`` by default) sees the original params.
+    """
+    import inspect
+
+    from arr_diagnostics.client import safe_tool
+
+    @safe_tool
+    def my_tool(series_id: int, season: int | None = None) -> str:
+        return "ok"
+
+    sig = inspect.signature(my_tool)
+    assert list(sig.parameters.keys()) == ["series_id", "season"]
+    assert sig.parameters["series_id"].annotation is int

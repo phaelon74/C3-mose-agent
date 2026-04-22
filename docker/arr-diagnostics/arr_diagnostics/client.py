@@ -79,7 +79,10 @@ class ArrClient:
     def post_json_documented_error(self, path: str, body: Any | None = None) -> str:
         """POST JSON and return ``json_response`` output or a structured HTTP error string."""
         url = f"{self.base}/api/v3{path}"
-        r = self._client.post(url, json=body)
+        try:
+            r = self._client.post(url, json=body)
+        except httpx.HTTPError as e:
+            return json.dumps({"error": "transport_error", "detail": repr(e), "path": path})
         if r.is_success:
             if not r.content:
                 return json.dumps({"http_status": r.status_code, "body": None})
@@ -94,6 +97,75 @@ class ArrClient:
             "body": text,
         }
         return json.dumps(err, indent=2)
+
+
+def safe_tool_decorator(mcp_tool_factory: Any) -> Any:
+    """Compose ``FastMCP.tool()`` with :func:`safe_tool` so every tool is exception-safe.
+
+    Usage inside a ``build_*_app`` function::
+
+        tool = safe_tool_decorator(mcp.tool)
+
+        @tool()
+        def my_tool() -> str: ...
+
+    Equivalent to ``@mcp.tool()`` then ``safe_tool`` wrapping.
+    """
+
+    def _decorator(*d_args: Any, **d_kwargs: Any) -> Any:
+        inner = mcp_tool_factory(*d_args, **d_kwargs)
+
+        def _apply(fn: Any) -> Any:
+            return inner(safe_tool(fn))
+
+        return _apply
+
+    return _decorator
+
+
+def safe_tool(fn: Any) -> Any:
+    """Wrap an MCP tool handler so unhandled exceptions return JSON instead of killing stdio.
+
+    Without this, a single ``httpx.HTTPStatusError`` or ``httpx.ConnectError`` inside a
+    FastMCP ``@mcp.tool()`` bubbles up through the stdio event loop and tears down the
+    client session (``anyio.ClosedResourceError`` on every subsequent call in the parent).
+    This decorator converts any exception into a JSON error string the agent can read.
+    """
+    import functools
+    import traceback
+
+    @functools.wraps(fn)
+    def _wrapped(*args: Any, **kwargs: Any) -> str:
+        try:
+            return fn(*args, **kwargs)
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = (e.response.text or "")[:4000]
+            except Exception:
+                pass
+            return json.dumps({
+                "error": "http_error",
+                "http_status": e.response.status_code,
+                "tool": fn.__name__,
+                "body": body,
+            })
+        except httpx.HTTPError as e:
+            return json.dumps({
+                "error": "transport_error",
+                "tool": fn.__name__,
+                "detail": repr(e),
+            })
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({
+                "error": "tool_unhandled_exception",
+                "tool": fn.__name__,
+                "type": type(e).__name__,
+                "detail": str(e)[:1000],
+                "trace": traceback.format_exc(limit=4)[-2000:],
+            })
+
+    return _wrapped
 
 
 def truncate_output(text: str, max_lines: int = 200, max_chars: int = 20000) -> str:
