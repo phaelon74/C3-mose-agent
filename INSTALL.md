@@ -168,7 +168,12 @@ calls.
 
 On the first run, the agent creates its SQLite memory database under the
 `mose-data` named volume and starts either the Signal or Discord bot
-depending on what you set in `.env`.
+depending on what you set in `.env`. Learned skills (approved Markdown under
+`/app/skills`), proposal JSON in `skills/pending/`, and archived rejections in
+`skills/rejected/` persist on the separate `mose-skills` named volume so they
+survive container recreate and image upgrades. **`docker compose down -v`
+removes both `mose-data` and `mose-skills`**, wiping memory and all skills on
+those volumes; use `docker compose down` without `-v` to keep them.
 
 #### A.5.1 Rebuild the shell sandbox after Dockerfile changes
 
@@ -231,6 +236,25 @@ only use if bridge + SNAT and macvlan are both unsuitable.
 **Capabilities:** Compose adds `cap_add: [NET_RAW]` so `ping` and `traceroute`
 work reliably with `cap_drop: ALL`. For `tcpdump` or similar, consider a
 separate compose profile that adds `NET_ADMIN` (wider privilege).
+
+#### A.5.4 Skills persistence (`mose-skills`)
+
+`mose-agent` and the one-shot `mose-skill-review` service both mount
+`mose-skills` at **`/app/skills`**, matching `[agent] skills_path` and
+`[learning] pending_dir` / `rejected_dir` in `config.toml`.
+
+On **first** use of a new named volume, Docker copies the image’s bundled
+`skills/` tree into the volume so the agent starts with the repo defaults.
+After that, **rebuilding the image does not update files already on the
+volume**; to pick up new upstream bundled skills, copy them in (for example
+`docker cp` from a fresh container) or remove the volume (which deletes learned
+skills as well). List the concrete volume name with `docker volume ls` (Compose
+prefixes it with the project name).
+
+**Bind-mount alternative:** replace the named volume with a host directory, for
+example `- ./data-skills:/app/skills`. Docker does not seed bind-mounts from the
+image—populate the directory first (e.g. `cp -a skills/ data-skills/`) and
+`chown -R 1000:1000 data-skills` so the `mose` user can write.
 
 ### A.6 Verify the isolation
 

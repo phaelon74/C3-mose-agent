@@ -149,6 +149,8 @@ services:
     volumes:
       - mose-data:/app/data
       - mose-workspace:/app/data/workspace
+      # Approved skills, pending proposals, and rejections (see INSTALL.md A.5.4).
+      - mose-skills:/app/skills
       # Required for TERMINAL_BACKEND=docker so mose-agent can `docker exec`
       # into mose-sandbox. The `mose` user is added to the `docker` group at
       # build time; for tighter deployments front the socket with a proxy.
@@ -186,6 +188,7 @@ services:
     volumes:
       - mose-data:/app/data
       - mose-workspace:/app/data/workspace
+      - mose-skills:/app/skills
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - mose-net
@@ -198,3 +201,4 @@ networks:
 volumes:
   mose-data:
   mose-workspace:
+  mose-skills:
