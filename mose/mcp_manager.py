@@ -73,8 +73,24 @@ class MCPManager:
             log_event(logger, "no_mcp_config", path=str(config_path))
             return
 
-        with open(config_path) as f:
-            config = json.load(f)
+        try:
+            with open(config_path, encoding="utf-8-sig") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            log_event(
+                logger,
+                "mcp_config_invalid_json",
+                path=str(config_path),
+                error=str(e),
+            )
+            logger.error(
+                "Invalid JSON in %s: %s. If the error is 'Extra data', the file likely contains "
+                "more than one top-level object (e.g. a second copy of { \"servers\": { ... } }). "
+                "Keep a single object, or use mcp_servers.example.json as a template.",
+                config_path,
+                e,
+            )
+            return
 
         for name, server_config in config.get("servers", {}).items():
             try:

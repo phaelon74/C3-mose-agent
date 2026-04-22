@@ -29,6 +29,10 @@ COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 COPY . .
 
+# If no registry was copied (minimal clone / CI), seed from the repo example — do not
+# overwrite an existing mcp_servers.json from COPY (operator-local file).
+RUN if [ ! -f mcp_servers.json ]; then cp mcp_servers.example.json mcp_servers.json; fi
+
 # Fail fast with actionable errors if pyproject.toml is a BOM/LFS pointer/UTF-16 style corrupt file.
 RUN python3 docker/check_pyproject.py
 

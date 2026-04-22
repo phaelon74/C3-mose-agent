@@ -423,6 +423,8 @@ native tools `list_available_tools` and `use_tool` (see `mose/agent.py`).
 cp mcp_servers.example.json mcp_servers.json
 ```
 
+**Docker Compose:** If `mcp_servers.json` exists in the build directory when you run `docker compose build`, it is copied into the agent image (`COPY . .`). If it is missing (e.g. CI), the Dockerfile copies `mcp_servers.example.json` to `mcp_servers.json` once. To override without rebuilding, bind-mount `./mcp_servers.json:/app/mcp_servers.json:ro` on `mose-agent`.
+
 For no MCP servers at all, an empty config is fine:
 
 ```json
@@ -835,6 +837,7 @@ agent's only outputs — an operator must review and action them.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `TOMLDecodeError` / `Invalid statement (at line 1, column 1)` during `docker compose build` | `pyproject.toml` in the build context is not real TOML (Git LFS pointer, UTF-16, UTF-8 BOM edge case, empty file) | On the host: `head -n3 pyproject.toml` must start with `[project]`. If you see `version https://git-lfs.github.com`, run `git lfs pull`. Re-save as UTF-8 without BOM if edited on Windows. The image runs `docker/check_pyproject.py` before `pip` to surface this. |
+| `JSONDecodeError: Extra data` when loading MCP | Two top-level JSON objects in `mcp_servers.json` (common after pasting the file twice or appending a second `{ "servers": ... }`) | Keep exactly one JSON object. Check with `python -m json.tool mcp_servers.json`. If you bind-mount a bad file into the container, fix the host copy or remove the mount so the image default applies (see D.0). The agent logs `mcp_config_invalid_json` and starts without MCP servers rather than crashing. |
 | `permission denied while trying to connect to /var/run/docker.sock` inside the container | `DOCKER_GID` build arg didn't match the host group | Rebuild: `DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build` |
 | `CUDA error: no kernel image` | Driver/CUDA version mismatch | Update NVIDIA driver and reinstall vLLM for the matching CUDA toolkit |
 | `Connection refused` on port 8001 | `worker-agent` service not running | `sudo systemctl start worker-agent` and inspect `journalctl -u worker-agent` |
