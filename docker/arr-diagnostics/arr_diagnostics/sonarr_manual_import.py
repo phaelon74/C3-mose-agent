@@ -121,6 +121,7 @@ def _prepare_row(
         rows,
         series_id,
         episode_id,
+        download_id=download_id,
         season_number=season_number,
         episode_number=episode_number,
         path_hints=path_hints,
@@ -129,9 +130,29 @@ def _prepare_row(
         return json.dumps({
             "error": "no_matching_manualimport_row",
             "candidates_after_get": len(rows),
-            "hint": "Pass pathHints from the Activity queue row (title/outputPath), plus seasonNumber/episodeNumber.",
+            "hint": (
+                "Rebuild sonarr-diagnostics so scripts pass pathHints; or ensure seasonNumber/episodeNumber "
+                "match nested episodes on /manualimport rows. Rows often map by S/E on episodes[], not id."
+            ),
         })
     return rows, _to_reprocess(row, [episode_id])
+
+
+def _manual_row_path_blob(row: dict[str, Any]) -> str:
+    """Concatenate filename-related strings for regex / substring matching."""
+    parts: list[str] = []
+    for k in ("path", "relativePath", "name", "folderName", "releaseGroup"):
+        v = row.get(k)
+        if isinstance(v, str) and v:
+            parts.append(v)
+    for er in row.get("episodes") or []:
+        if isinstance(er, dict):
+            for k in ("title", "releaseTitle"):
+                tv = er.get(k)
+                if isinstance(tv, str) and tv:
+                    parts.append(tv)
+    blob = "\0".join(parts).replace("\\", "/").lower()
+    return blob
 
 
 def _pick_manual_row(
@@ -139,6 +160,7 @@ def _pick_manual_row(
     series_id: int,
     episode_id: int,
     *,
+    download_id: str | None = None,
     season_number: int | None,
     episode_number: int | None,
     path_hints: list[str] | None,
@@ -167,43 +189,68 @@ def _pick_manual_row(
 
     narrowed = [r for r in pool if season_ok(r)] if season_number is not None else pool
 
+    # 0) Prefer rows whose downloadId matches the GET query (multi-file releases)
+    if download_id and str(download_id).strip():
+        q = str(download_id).strip().lower()
+        with_did = [
+            r for r in narrowed
+            if str(r.get("downloadId") or "").strip().lower() == q
+        ]
+        if with_did:
+            narrowed = with_did
+
     # 1) Episode id appears on a nested episode (correct row for this file)
     for row in narrowed:
         for er in row.get("episodes") or []:
             if isinstance(er, dict) and er.get("id") == episode_id:
                 return row
 
-    # 2) Path matches standard SxxEyy (release names; include single-digit season variants)
+    # 2) Nested episodes match season/episode numbers (Sonarr often sets S/E before DB id lines up)
+    if season_number is not None and episode_number is not None:
+        for row in narrowed:
+            for er in row.get("episodes") or []:
+                if not isinstance(er, dict):
+                    continue
+                sn = er.get("seasonNumber")
+                en = er.get("episodeNumber")
+                if sn is None or en is None:
+                    continue
+                if int(sn) == season_number and int(en) == episode_number:
+                    return row
+
+    # 3) Row-level season/episode (some payloads expose one episode flat on the row)
+    if season_number is not None and episode_number is not None:
+        for row in narrowed:
+            rs = row.get("seasonNumber")
+            re_ = row.get("episodeNumber")
+            if rs is None or re_ is None:
+                continue
+            if int(rs) == season_number and int(re_) == episode_number:
+                return row
+
+    # 4) Path matches SxxEyy, ``4x26``, etc.
     if season_number is not None and episode_number is not None:
         patterns = [
             rf"[Ss]{season_number:02d}[Ee]{episode_number:02d}",
             rf"[Ss]{season_number}[Ee]{episode_number:02d}\b",
             rf"[Ss]{season_number:02d}[Ee]{episode_number}\b",
             rf"[Ss]{season_number}[Ee]{episode_number}\b",
+            rf"(?i)\b{season_number}[xX]{episode_number}\b",
         ]
         for row in narrowed:
-            path = (row.get("path") or "") + (row.get("relativePath") or "") + (row.get("name") or "")
+            path = _manual_row_path_blob(row)
             for pat in patterns:
                 if re.search(pat, path, re.I):
                     return row
 
-    # 3) Queue-derived path hints (title / outputPath from Activity)
+    # 5) Queue-derived path hints (title / outputPath from Activity)
     if path_hints:
         best: dict[str, Any] | None = None
         best_score = 0
         for row in narrowed:
-            blob = (
-                (row.get("path") or "")
-                + "\0"
-                + (row.get("relativePath") or "")
-                + "\0"
-                + (row.get("name") or "")
-                + "\0"
-                + (row.get("folderName") or "")
-            ).lower()
+            blob = _manual_row_path_blob(row)
             for hint in sorted({h.strip() for h in path_hints if len(h.strip()) > 3}, key=len, reverse=True):
-                hl = hint.lower().strip()
-                # Short standalone ``S04E26`` tokens; long release names still need >= 8 chars
+                hl = hint.lower().strip().replace("\\", "/")
                 _token = re.fullmatch(r"s\d{1,2}e\d{1,3}", hl)
                 min_len = 4 if _token else 8
                 if len(hl) >= min_len and hl in blob:
@@ -213,11 +260,11 @@ def _pick_manual_row(
         if best is not None:
             return best
 
-    # 4) Single candidate after season filter
+    # 6) Single candidate after season filter
     if len(narrowed) == 1:
         return narrowed[0]
 
-    # 5) Single candidate overall (only safe ambiguous case)
+    # 7) Single candidate overall (only safe ambiguous case)
     if len(pool) == 1:
         return pool[0]
 

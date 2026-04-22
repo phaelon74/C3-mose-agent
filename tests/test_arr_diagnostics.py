@@ -37,6 +37,36 @@ def test_policy_read_counts_match_plan() -> None:
     assert len(mp._RADARR_DIAG_READS) == 23  # noqa: SLF001
 
 
+def test_manual_import_row_picked_by_nested_season_episode() -> None:
+    """When episode id is missing on manualimport rows, match S/E on nested episodes."""
+    from arr_diagnostics.sonarr_manual_import import _pick_manual_row
+
+    rows = [
+        {
+            "seriesId": 10,
+            "downloadId": "abc",
+            "path": "/dl/a/other.mkv",
+            "episodes": [{"seasonNumber": 4, "episodeNumber": 25}],
+        },
+        {
+            "seriesId": 10,
+            "downloadId": "abc",
+            "path": "/dl/a/target.mkv",
+            "episodes": [{"seasonNumber": 4, "episodeNumber": 26}],
+        },
+    ]
+    picked = _pick_manual_row(
+        rows,
+        10,
+        172292,
+        download_id="abc",
+        season_number=4,
+        episode_number=26,
+        path_hints=None,
+    )
+    assert picked is rows[1]
+
+
 def test_build_apps_do_not_raise() -> None:
     from arr_diagnostics.client import ArrClient
     from arr_diagnostics.radarr_mcp import build_radarr_app
