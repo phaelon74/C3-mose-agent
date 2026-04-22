@@ -21,7 +21,39 @@ def _prepend_arr_path() -> None:
 def test_sonarr_command_allowlist_length() -> None:
     from arr_diagnostics.sonarr_mcp import SONARR_COMMANDS
 
-    assert len(SONARR_COMMANDS) == 7
+    assert len(SONARR_COMMANDS) == 6
+
+
+def test_post_episode_search_requires_ids() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _post_episode_search_command
+
+    class _C:
+        def post_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("should not POST without episode ids")
+
+    out = _post_episode_search_command(_C(), [])  # type: ignore[arg-type]
+    assert _json.loads(out)["error"] == "episodeIds_required"
+
+
+def test_post_episode_search_posts_episode_ids() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _post_episode_search_command
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_body: object | None = None
+
+        def post_json(self, path: str, body: object | None = None) -> object:
+            self.last_body = body
+            return {"id": 1, "name": "EpisodeSearch"}
+
+    client = _C()
+    out = _post_episode_search_command(client, [10, 20])  # type: ignore[arg-type]
+    assert _json.loads(out)["name"] == "EpisodeSearch"
+    assert client.last_body == {"name": "EpisodeSearch", "episodeIds": [10, 20]}
 
 
 def test_radarr_command_allowlist_length() -> None:
@@ -33,7 +65,7 @@ def test_radarr_command_allowlist_length() -> None:
 def test_policy_read_counts_match_plan() -> None:
     from mose import mcp_write_policy as mp
 
-    assert len(mp._SONARR_DIAG_READS) == 24  # noqa: SLF001
+    assert len(mp._SONARR_DIAG_READS) == 25  # noqa: SLF001
     assert len(mp._RADARR_DIAG_READS) == 23  # noqa: SLF001
 
 

@@ -104,6 +104,7 @@ _SONARR_DIAG_READS: frozenset[str] = frozenset({
     "sonarr_get_episode",
     "sonarr_get_episode_by_id",
     "sonarr_get_episode_files",
+    "sonarr_get_series",
     "sonarr_get_series_by_id",
     "sonarr_get_series_folder",
     "sonarr_get_diskspace",

@@ -14,11 +14,20 @@ SONARR_COMMANDS = frozenset({
     "ManualImport",
     "RescanSeries",
     "RefreshSeries",
-    "EpisodeSearch",
     "DownloadedEpisodesScan",
     "RssSync",
     "RefreshMonitoredDownloads",
 })
+
+
+def _post_episode_search_command(client: ArrClient, episode_ids: list[int]) -> str:
+    """POST ``EpisodeSearch`` with explicit ids (Sonarr treats missing ``episodeIds`` as search-all-missing)."""
+    if not episode_ids:
+        return json.dumps({
+            "error": "episodeIds_required",
+            "detail": "Pass one or more Sonarr episode ids. Resolve SxxEyy via GET /episode before searching.",
+        })
+    return json_response(client.post_json("/command", {"name": "EpisodeSearch", "episodeIds": episode_ids}))
 
 
 def build_sonarr_app(c: ArrClient) -> FastMCP:
@@ -147,6 +156,11 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         _run.__doc__ = f"POST /command with name={name!r}."
         return _run
 
+    @tool()
+    def sonarr_post_command_episode_search(episodeIds: list[int]) -> str:
+        """POST /command ``EpisodeSearch`` for **specific Sonarr episode row ids only** (from ``sonarr_get_episode`` / ``sonarr_get_episode_by_id``). A parameterless ``EpisodeSearch`` in Sonarr searches *all* missing monitored episodes; that path is not exposed here on purpose. Requires approval."""
+        return _post_episode_search_command(c, episodeIds)
+
     for _cmd in sorted(SONARR_COMMANDS):
         mcp.tool(name=f"sonarr_command_{_cmd}")(_command_tool(_cmd))
 
@@ -202,6 +216,11 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         if episodeFileIds is not None:
             params["episodeFileIds"] = episodeFileIds
         return json_response(c.get_json("/episodefile", params or None))
+
+    @tool()
+    def sonarr_get_series() -> str:
+        """GET /series — all series in the library (response can be large). Match ``title`` / ``sortTitle`` to find ``id``, then use ``sonarr_get_episode`` and ``sonarr_post_command_episode_search``."""
+        return json_response(c.get_json("/series"))
 
     @tool()
     def sonarr_get_series_by_id(id: int) -> str:

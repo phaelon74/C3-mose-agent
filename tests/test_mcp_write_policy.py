@@ -42,6 +42,7 @@ def test_plex_stack_automation(bare: str, expected: str) -> None:
         ("sonarr_delete_queue_item", "write"),
         ("sonarr_command_RssSync", "write"),
         ("sonarr_post_system_shutdown", "write"),
+        ("sonarr_get_series", "read"),
         ("sonarr_get_series_by_id", "read"),
         ("sonarr_post_queue_import", "write"),
     ],
