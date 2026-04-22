@@ -1,7 +1,8 @@
-"""Classify MCP tools for Plex sidecars: read-only vs requires human approval.
+"""Classify MCP tools for gated MCP servers: read-only vs requires human approval.
 
-Only servers registered in ``PROTECTED_MCP_SERVERS`` are gated. Other MCP
-servers (e.g. paper_db) are left unrestricted so existing installs keep working.
+Servers in ``PROTECTED_MCP_SERVERS`` (Plex sidecars, Sonarr/Radarr diagnostics)
+use per-server read allowlists. Other MCP servers (e.g. paper_db) are left
+unrestricted so existing installs keep working.
 """
 
 from __future__ import annotations
@@ -9,7 +10,12 @@ from __future__ import annotations
 from typing import Literal
 
 # Keys must match the ``servers`` entry names in ``mcp_servers.json``.
-PROTECTED_MCP_SERVERS = frozenset({"plex-ops-admin", "plex-stack-automation"})
+PROTECTED_MCP_SERVERS = frozenset({
+    "plex-ops-admin",
+    "plex-stack-automation",
+    "sonarr-diagnostics",
+    "radarr-diagnostics",
+})
 
 # vladimir-tutin/plex-mcp-server — read-only tools (everything else needs approval).
 _PLEX_OPS_READS: frozenset[str] = frozenset({
@@ -85,9 +91,66 @@ _PLEX_STACK_READS: frozenset[str] = frozenset({
     "trakt_get_sync_status",
 })
 
+# docker/arr-diagnostics Sonarr MCP — GET-only tools (everything else requires approval).
+_SONARR_DIAG_READS: frozenset[str] = frozenset({
+    "sonarr_get_queue",
+    "sonarr_get_queue_details",
+    "sonarr_get_queue_status",
+    "sonarr_get_health",
+    "sonarr_get_log_file",
+    "sonarr_get_log",
+    "sonarr_get_manual_import",
+    "sonarr_get_history",
+    "sonarr_get_episode",
+    "sonarr_get_episode_by_id",
+    "sonarr_get_episode_files",
+    "sonarr_get_series_by_id",
+    "sonarr_get_series_folder",
+    "sonarr_get_diskspace",
+    "sonarr_get_filesystem",
+    "sonarr_get_filesystem_mediafiles",
+    "sonarr_get_system_status",
+    "sonarr_get_system_task",
+    "sonarr_get_system_task_by_id",
+    "sonarr_get_update",
+    "sonarr_get_indexers",
+    "sonarr_get_indexer",
+    "sonarr_get_downloadclients",
+    "sonarr_get_downloadclient",
+})
+
+# docker/arr-diagnostics Radarr MCP — GET-only tools.
+_RADARR_DIAG_READS: frozenset[str] = frozenset({
+    "radarr_get_queue",
+    "radarr_get_queue_details",
+    "radarr_get_queue_status",
+    "radarr_get_health",
+    "radarr_get_log_file",
+    "radarr_get_log",
+    "radarr_get_manual_import",
+    "radarr_get_history",
+    "radarr_get_movie",
+    "radarr_get_movie_by_id",
+    "radarr_get_movie_files",
+    "radarr_get_movie_folder",
+    "radarr_get_diskspace",
+    "radarr_get_filesystem",
+    "radarr_get_filesystem_mediafiles",
+    "radarr_get_system_status",
+    "radarr_get_system_task",
+    "radarr_get_system_task_by_id",
+    "radarr_get_update",
+    "radarr_get_indexers",
+    "radarr_get_indexer",
+    "radarr_get_downloadclients",
+    "radarr_get_downloadclient",
+})
+
 _READ_BY_SERVER: dict[str, frozenset[str]] = {
     "plex-ops-admin": _PLEX_OPS_READS,
     "plex-stack-automation": _PLEX_STACK_READS,
+    "sonarr-diagnostics": _SONARR_DIAG_READS,
+    "radarr-diagnostics": _RADARR_DIAG_READS,
 }
 
 

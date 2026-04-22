@@ -119,7 +119,7 @@ class AgentConfig:
     # If non-empty, only tools whose name starts with "<server>__" are inlined.
     inline_mcp_servers: list[str] = field(default_factory=list)
     # Log once per session when len(tools) exceeds this (soft cap; no hard trim).
-    inline_mcp_tools_soft_cap: int = 80
+    inline_mcp_tools_soft_cap: int = 200
 
 
 @dataclass

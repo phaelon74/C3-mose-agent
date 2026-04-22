@@ -488,6 +488,48 @@ docker compose exec plex-stack-automation sh -lc \
 Very large Radarr libraries (20k+ movies) may make the first `radarr_get_movies` MCP
 call take on the order of **30 seconds**; that is expected for niavasha’s server.
 
+The same `SONARR_*` and `RADARR_*` variables also power the **arr-diagnostics** sidecars
+(see below) for deep queue, import, log, and `*arr` command tools.
+
+### D.3.1 Sonarr / Radarr diagnostics MCP (`sonarr-diagnostics`, `radarr-diagnostics`)
+
+The repository builds a small Python MCP image ([`docker/arr-diagnostics/`](docker/arr-diagnostics/))
+with one **shared** API client and **two** stdio entrypoints: `mcp-entrypoint-sonarr` and
+`mcp-entrypoint-radarr`. They expose `sonarr_*` and `radarr_*` tools (queue, health, logs,
+manual import, history, library file reads, disk/filesystem, system, indexer and
+download-client test, and a small set of `*arr` `command` names). **Write** tools
+(restart, shutdown, queue delete, `RssSync`, etc.) require the same Signal admin approval
+as other protected MCP servers (see D.6).
+
+- **When to use:** deep import/queue debugging. For “add a show or movie from search”
+  workflows, [niavasha/plex-mcp-server](https://github.com/niavasha/plex-mcp-server) in
+  `plex-stack-automation` is still the main path.
+- **Container names:** `mose-sonarr-diagnostics`, `mose-radarr-diagnostics` (see
+  `mcp_servers.example.json` and `docker compose` service names).
+- **Approximate tool count:** about **37** `sonarr-diagnostics` tools and **35**
+  `radarr-diagnostics` tools. With `plex-ops-admin`, `plex-stack-automation`, and both arr
+  servers inlined, merged tool schemas exceed **80** — raise `inline_mcp_tools_soft_cap`
+  (see `config.toml`; default is **200**) or omit servers you do not enable in
+  `inline_mcp_servers`.
+
+Smoke-check from a running Sonarr diagnostics container (uses **httpx** from the image; `curl` is not installed):
+
+```bash
+docker compose exec -i sonarr-diagnostics python - <<'PY'
+import os
+
+import httpx
+
+base = os.environ["SONARR_URL"].strip().rstrip("/")
+if base.endswith("/api/v3"):
+    base = base[: -len("/api/v3")]
+url = f"{base}/api/v3/system/status"
+r = httpx.get(url, headers={"X-Api-Key": os.environ["SONARR_API_KEY"]}, timeout=10)
+r.raise_for_status()
+print(r.json())
+PY
+```
+
 ### D.4 Optional Trakt (niavasha only)
 
 Create a Trakt OAuth application with redirect URI `urn:ietf:wg:oauth:2.0:oob`. Put
@@ -497,11 +539,12 @@ via MCP tools such as `trakt_authenticate`. Trakt sync / scrobble tools are trea
 
 ### D.5 Map credentials to containers
 
-| Variable | `plex-ops-admin` | `plex-stack-automation` |
-|----------|------------------|-------------------------|
-| `PLEX_URL`, `PLEX_TOKEN` | yes | yes |
-| `SONARR_*`, `RADARR_*` | no | yes |
-| `TRAKT_*` | no | yes (optional) |
+| Variable | `plex-ops-admin` | `plex-stack-automation` | `sonarr-diagnostics` | `radarr-diagnostics` |
+|----------|------------------|-------------------------|------------------------|------------------------|
+| `PLEX_URL`, `PLEX_TOKEN` | yes | yes | no | no |
+| `SONARR_*` | no | yes | yes | no |
+| `RADARR_*` | no | yes | no | yes |
+| `TRAKT_*` | no | yes (optional) | no | no |
 
 Compose injects these from the project `.env` (chmod `600`, gitignored). **mose-agent**
 does not receive Plex/Sonarr/Radarr secrets; it only runs `docker exec -i` into the
@@ -513,29 +556,32 @@ Build and start the idle MCP containers on `mose-net` (no published ports — on
 other containers on the same compose network can reach them):
 
 ```bash
-docker compose build plex-ops-admin plex-stack-automation
-docker compose up -d plex-ops-admin plex-stack-automation
+docker compose build plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
+docker compose up -d plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
 ```
 
 Then start or restart the agent as usual (section A.5). The agent image includes the
 **docker CLI** so it can stdio-bridge into those containers using `mcp_servers.json`
 entries like the ones in `mcp_servers.example.json`. `mose-agent` declares
-`depends_on` for both sidecars, so `docker compose up -d mose-agent` will also
+`depends_on` for each configured MCP sidecar (`plex-ops-admin`, `plex-stack-automation`,
+`sonarr-diagnostics`, `radarr-diagnostics`), so `docker compose up -d mose-agent` will also
 bring them up first — their containers must exist before the agent initializes
 MCP or those tools will silently disappear until the next agent restart.
 
 **To disable the Plex MCP integration entirely:** comment out the
-`plex-ops-admin` and `plex-stack-automation` services **and** the two matching
+`plex-ops-admin` and `plex-stack-automation` services **and** the matching
 `depends_on` lines under `mose-agent:` in `docker-compose.yml`, and remove the
-same two entries from `mcp_servers.json`.
+same entries from `mcp_servers.json`. Do the same for `sonarr-diagnostics` /
+`radarr-diagnostics` if you do not use the diagnostics sidecars.
 
 **Routing:** MCP containers use the default bridge (`mose-net`). Outbound connections
 to each upstream IP on `10.4.251.0/24` are forwarded and SNATed by the Docker host,
 same model as section A.5.3. There is **no shared “media host”** assumption — only
 per-service URLs in `.env`.
 
-**Policy — reads vs writes:** For server names `plex-ops-admin` and
-`plex-stack-automation`, tools on the **read allowlist** in `mose/mcp_write_policy.py`
+**Policy — reads vs writes:** For server names `plex-ops-admin`,
+`plex-stack-automation`, `sonarr-diagnostics`, and `radarr-diagnostics`, tools on the
+**read allowlist** in `mose/mcp_write_policy.py`
 run immediately. Every other tool on those servers requires the **same human approval**
 flow as `sre_execute` (Signal **admin** group with `SIGNAL_ADMIN_GROUP_ID`, 60 second
 timeout). If no approval callback is configured (e.g. half-configured CLI), mutating
@@ -547,8 +593,10 @@ Other MCP servers (e.g. `paper_db`) are not gated by this policy.
 `server__tool` functions — **prefer those** over `bash`/`curl` to Plex, Sonarr, or
 Radarr (credentials live only in the MCP sidecars). Set `inline_mcp_tools = false`
 to hide MCP tools from that list and rely on `list_available_tools` / `use_tool`
-only. Optional `inline_mcp_servers = ["plex-ops-admin", "plex-stack-automation"]`
-limits which MCP servers are inlined (omit or leave empty for all). If the merged
+only. Optional `inline_mcp_servers` can list a subset, for example
+`["plex-ops-admin", "plex-stack-automation", "sonarr-diagnostics", "radarr-diagnostics"]`
+(see `config.toml` comments). Omit or leave empty to inline *all* connected MCP servers.
+If the merged
 tool count exceeds `inline_mcp_tools_soft_cap`, the agent logs `tool_list_over_cap`
 once per chat session — raise the cap or narrow `inline_mcp_servers` if your LLM
 backend struggles with large tool payloads.
@@ -557,6 +605,9 @@ backend struggles with large tool payloads.
 (`plex-ops-admin`) covers broad Plex operations including playback and server maintenance.
 [niavasha/plex-mcp-server](https://github.com/niavasha/plex-mcp-server)
 (`plex-stack-automation`) adds Sonarr/Radarr and analytics-style Plex tools.
+[`sonarr-diagnostics`](docker/arr-diagnostics/) and [`radarr-diagnostics`](docker/arr-diagnostics/)
+provide detailed *arr API v3 diagnostics (queue, imports, logs, commands) without expanding
+niavasha’s surface area.
 
 ---
 

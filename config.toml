@@ -33,9 +33,16 @@ skills_path = "skills"
 recent_messages_limit = 15
 # Merge MCP tool schemas into the main LLM tool list (main agent only). See INSTALL.md §D.
 inline_mcp_tools = true
-# Restrict inlining to named MCP servers only, e.g. ["plex-ops-admin", "plex-stack-automation"].
+# Restrict inlining to named MCP servers only. Homelab default when Plex + niavasha + arr diagnostics run:
+# inline_mcp_servers = [
+#   "plex-ops-admin",
+#   "plex-stack-automation",
+#   "sonarr-diagnostics",
+#   "radarr-diagnostics",
+# ]
 # inline_mcp_servers = []
-inline_mcp_tools_soft_cap = 80
+# With all five servers inlined, tool count exceeds 80 — raise cap or omit servers you do not need.
+inline_mcp_tools_soft_cap = 200
 
 [terminal]
 # "local" for dev; "docker" when agent container uses docker.sock to exec into mose-sandbox
