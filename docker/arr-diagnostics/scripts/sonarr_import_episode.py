@@ -110,9 +110,9 @@ def main() -> None:
             episode_id = int(ep["id"])
             print(f"episodeId={episode_id}  title={ep.get('title')!r}")
 
-            download_id = _resolve_download_id(http, api, series_id, episode_id)
+            queue_rec = _resolve_queue_record(http, api, series_id, episode_id)
 
-            if not download_id:
+            if not queue_rec:
                 print(
                     "Could not find a queue row with downloadId for this episode.",
                     file=sys.stderr,
@@ -123,15 +123,25 @@ def main() -> None:
                 )
                 sys.exit(5)
 
+            download_id = queue_rec.get("downloadId")
+            if not download_id:
+                print("Queue row matched but downloadId is missing.", file=sys.stderr)
+                sys.exit(5)
+
+            path_hints = _queue_path_hints(queue_rec, args.season, args.episode)
+
             print(f"downloadId={download_id}")
+            if path_hints:
+                print(f"path_hints={path_hints!r}")
 
             prep = prepare_manual_import_payload(
                 client,
-                download_id,
+                str(download_id),
                 series_id,
                 episode_id,
                 season_number=args.season,
                 episode_number=args.episode,
+                path_hints=path_hints,
             )
             if isinstance(prep, str):
                 print(prep, file=sys.stderr)
@@ -157,7 +167,7 @@ def main() -> None:
         client.close()
 
 
-def _resolve_download_id(http: Any, api: str, series_id: int, episode_id: int) -> str | None:
+def _resolve_queue_record(http: Any, api: str, series_id: int, episode_id: int) -> dict[str, Any] | None:
     r = http.get(
         f"{api}/queue/details",
         params={
@@ -168,9 +178,9 @@ def _resolve_download_id(http: Any, api: str, series_id: int, episode_id: int) -
     )
     if r.is_success:
         detail = r.json()
-        did = _extract_download_id(detail, series_id, episode_id)
-        if did:
-            return did
+        rec = _find_matching_queue_record(detail, series_id, episode_id)
+        if rec and rec.get("downloadId"):
+            return rec
 
     page = 1
     page_size = 200
@@ -179,9 +189,9 @@ def _resolve_download_id(http: Any, api: str, series_id: int, episode_id: int) -
         r.raise_for_status()
         qdata = r.json()
         records = qdata.get("records") or []
-        did = _scan_queue_records(records, series_id, episode_id)
-        if did:
-            return did
+        found = _scan_queue_for_record(records, series_id, episode_id)
+        if found and found.get("downloadId"):
+            return found
         total = qdata.get("totalRecords") or len(records)
         if page * page_size >= total or not records:
             break
@@ -189,22 +199,50 @@ def _resolve_download_id(http: Any, api: str, series_id: int, episode_id: int) -
     return None
 
 
-def _extract_download_id(data: Any, series_id: int, episode_id: int) -> str | None:
+def _find_matching_queue_record(data: Any, series_id: int, episode_id: int) -> dict[str, Any] | None:
     if isinstance(data, list):
         for item in data:
-            found = _extract_download_id(item, series_id, episode_id)
+            found = _find_matching_queue_record(item, series_id, episode_id)
             if found:
                 return found
         return None
     if isinstance(data, dict):
         did = data.get("downloadId")
         if did and _episode_matches_structure(data, series_id, episode_id):
-            return str(did)
+            return data
         for v in data.values():
-            found = _extract_download_id(v, series_id, episode_id)
+            found = _find_matching_queue_record(v, series_id, episode_id)
             if found:
                 return found
     return None
+
+
+def _queue_path_hints(rec: dict[str, Any], season: int, episode: int) -> list[str]:
+    """Strings from the Activity queue row + ``SxxEyy`` tokens for manualimport row matching."""
+    out: list[str] = []
+    for key in ("outputPath", "title", "sourceTitle", "name", "releaseTitle"):
+        v = rec.get(key)
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+    ep = rec.get("episode")
+    if isinstance(ep, dict):
+        t = ep.get("title")
+        if isinstance(t, str) and t.strip():
+            out.append(t.strip())
+    ss, ee = season, episode
+    for t in (
+        f"S{ss:02d}E{ee:02d}",
+        f"s{ss:02d}e{ee:02d}",
+        f".S{ss:02d}E{ee:02d}.",
+    ):
+        out.append(t)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for h in out:
+        if h not in seen:
+            seen.add(h)
+            uniq.append(h)
+    return uniq
 
 
 def _episode_matches_structure(rec: dict[str, Any], series_id: int, episode_id: int) -> bool:
@@ -222,7 +260,7 @@ def _episode_matches_structure(rec: dict[str, Any], series_id: int, episode_id: 
     return False
 
 
-def _scan_queue_records(records: list[Any], series_id: int, episode_id: int) -> str | None:
+def _scan_queue_for_record(records: list[Any], series_id: int, episode_id: int) -> dict[str, Any] | None:
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -234,11 +272,9 @@ def _scan_queue_records(records: list[Any], series_id: int, episode_id: int) -> 
         ep_ids = rec.get("episodeIds") or []
         ep_obj = rec.get("episode") or {}
         if episode_id in [int(x) for x in ep_ids]:
-            did = rec.get("downloadId")
-            return str(did) if did else None
+            return rec
         if ep_obj.get("id") == episode_id:
-            did = rec.get("downloadId")
-            return str(did) if did else None
+            return rec
     return None
 
 

@@ -54,6 +54,12 @@ def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
     eids = [int(x) for x in episode_ids]
     season_num = payload_dict.get("seasonNumber")
     episode_num = payload_dict.get("episodeNumber")
+    raw_hints = payload_dict.get("pathHints")
+    path_hints: list[str] | None = None
+    if isinstance(raw_hints, list):
+        path_hints = [str(x).strip() for x in raw_hints if str(x).strip()]
+        if not path_hints:
+            path_hints = None
     prep = _prepare_row(
         c,
         str(download_id),
@@ -61,6 +67,7 @@ def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
         eids[0],
         season_number=int(season_num) if season_num is not None else None,
         episode_number=int(episode_num) if episode_num is not None else None,
+        path_hints=path_hints,
     )
     if isinstance(prep, str):
         return prep
@@ -76,6 +83,7 @@ def prepare_manual_import_payload(
     *,
     season_number: int | None = None,
     episode_number: int | None = None,
+    path_hints: list[str] | None = None,
 ) -> tuple[list[Any], dict[str, Any]] | str:
     """Return ``(manualimport GET rows, single POST body element)`` or error JSON string."""
     return _prepare_row(
@@ -85,6 +93,7 @@ def prepare_manual_import_payload(
         episode_id,
         season_number=season_number,
         episode_number=episode_number,
+        path_hints=path_hints,
     )
 
 
@@ -96,6 +105,7 @@ def _prepare_row(
     *,
     season_number: int | None = None,
     episode_number: int | None = None,
+    path_hints: list[str] | None = None,
 ) -> tuple[list[Any], dict[str, Any]] | str:
     params: dict[str, Any] = {"downloadId": download_id, "seriesId": series_id}
     if season_number is not None:
@@ -113,12 +123,13 @@ def _prepare_row(
         episode_id,
         season_number=season_number,
         episode_number=episode_number,
+        path_hints=path_hints,
     )
     if row is None:
         return json.dumps({
             "error": "no_matching_manualimport_row",
             "candidates_after_get": len(rows),
-            "hint": "Pass seasonNumber/episodeNumber (MCP payload) or use a more specific downloadId.",
+            "hint": "Pass pathHints from the Activity queue row (title/outputPath), plus seasonNumber/episodeNumber.",
         })
     return rows, _to_reprocess(row, [episode_id])
 
@@ -130,6 +141,7 @@ def _pick_manual_row(
     *,
     season_number: int | None,
     episode_number: int | None,
+    path_hints: list[str] | None,
 ) -> dict[str, Any] | None:
     scoped: list[dict[str, Any]] = []
     for row in rows:
@@ -161,20 +173,51 @@ def _pick_manual_row(
             if isinstance(er, dict) and er.get("id") == episode_id:
                 return row
 
-    # 2) Path matches standard SxxEyy (release names)
+    # 2) Path matches standard SxxEyy (release names; include single-digit season variants)
     if season_number is not None and episode_number is not None:
-        tag = rf"[Ss]{season_number:02d}[Ee]{episode_number:02d}"
-        tag_alt = rf"[Ss]{season_number}[Ee]{episode_number}\b"
+        patterns = [
+            rf"[Ss]{season_number:02d}[Ee]{episode_number:02d}",
+            rf"[Ss]{season_number}[Ee]{episode_number:02d}\b",
+            rf"[Ss]{season_number:02d}[Ee]{episode_number}\b",
+            rf"[Ss]{season_number}[Ee]{episode_number}\b",
+        ]
         for row in narrowed:
             path = (row.get("path") or "") + (row.get("relativePath") or "") + (row.get("name") or "")
-            if re.search(tag, path, re.I) or re.search(tag_alt, path, re.I):
-                return row
+            for pat in patterns:
+                if re.search(pat, path, re.I):
+                    return row
 
-    # 3) Single candidate after season filter
+    # 3) Queue-derived path hints (title / outputPath from Activity)
+    if path_hints:
+        best: dict[str, Any] | None = None
+        best_score = 0
+        for row in narrowed:
+            blob = (
+                (row.get("path") or "")
+                + "\0"
+                + (row.get("relativePath") or "")
+                + "\0"
+                + (row.get("name") or "")
+                + "\0"
+                + (row.get("folderName") or "")
+            ).lower()
+            for hint in sorted({h.strip() for h in path_hints if len(h.strip()) > 3}, key=len, reverse=True):
+                hl = hint.lower().strip()
+                # Short standalone ``S04E26`` tokens; long release names still need >= 8 chars
+                _token = re.fullmatch(r"s\d{1,2}e\d{1,3}", hl)
+                min_len = 4 if _token else 8
+                if len(hl) >= min_len and hl in blob:
+                    if len(hl) > best_score:
+                        best_score = len(hl)
+                        best = row
+        if best is not None:
+            return best
+
+    # 4) Single candidate after season filter
     if len(narrowed) == 1:
         return narrowed[0]
 
-    # 4) Single candidate overall (only safe ambiguous case)
+    # 5) Single candidate overall (only safe ambiguous case)
     if len(pool) == 1:
         return pool[0]
 
