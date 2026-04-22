@@ -138,10 +138,48 @@ def _prepare_row(
     return rows, _to_reprocess(row, [episode_id])
 
 
+def _int_eq(a: Any, b: int) -> bool:
+    """Compare API ints that may arrive as str/float."""
+    try:
+        return int(a) == b
+    except (TypeError, ValueError):
+        return False
+
+
+def _expand_path_hints(path_hints: list[str]) -> list[str]:
+    """Full hint strings plus path segments/basenames (queue folder vs disk path differ)."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in path_hints:
+        h = raw.strip()
+        if len(h) <= 3:
+            continue
+        chunks = [h]
+        norm = h.replace("\\", "/")
+        if "/" in norm:
+            chunks.extend(s for s in norm.split("/") if s.strip())
+        for c in chunks:
+            t = c.strip()
+            lt = t.lower()
+            if len(t) <= 3 or lt in seen:
+                continue
+            seen.add(lt)
+            ordered.append(t)
+    return sorted(ordered, key=len, reverse=True)
+
+
 def _manual_row_path_blob(row: dict[str, Any]) -> str:
     """Concatenate filename-related strings for regex / substring matching."""
     parts: list[str] = []
-    for k in ("path", "relativePath", "name", "folderName", "releaseGroup"):
+    for k in (
+        "path",
+        "relativePath",
+        "name",
+        "folderName",
+        "releaseGroup",
+        "releaseTitle",
+        "simpleReleaseTitle",
+    ):
         v = row.get(k)
         if isinstance(v, str) and v:
             parts.append(v)
@@ -180,14 +218,17 @@ def _pick_manual_row(
     def season_ok(row: dict[str, Any]) -> bool:
         if season_number is None:
             return True
-        if row.get("seasonNumber") is not None and int(row["seasonNumber"]) == season_number:
+        if row.get("seasonNumber") is not None and _int_eq(row.get("seasonNumber"), season_number):
             return True
         for er in row.get("episodes") or []:
-            if isinstance(er, dict) and er.get("seasonNumber") == season_number:
+            if isinstance(er, dict) and _int_eq(er.get("seasonNumber"), season_number):
                 return True
         return False
 
     narrowed = [r for r in pool if season_ok(r)] if season_number is not None else pool
+    # Sonarr often omits season on manualimport rows; do not leave an empty pool.
+    if season_number is not None and not narrowed:
+        narrowed = list(pool)
 
     # 0) Prefer rows whose downloadId matches the GET query (multi-file releases)
     if download_id and str(download_id).strip():
@@ -215,7 +256,7 @@ def _pick_manual_row(
                 en = er.get("episodeNumber")
                 if sn is None or en is None:
                     continue
-                if int(sn) == season_number and int(en) == episode_number:
+                if _int_eq(sn, season_number) and _int_eq(en, episode_number):
                     return row
 
     # 3) Row-level season/episode (some payloads expose one episode flat on the row)
@@ -225,7 +266,7 @@ def _pick_manual_row(
             re_ = row.get("episodeNumber")
             if rs is None or re_ is None:
                 continue
-            if int(rs) == season_number and int(re_) == episode_number:
+            if _int_eq(rs, season_number) and _int_eq(re_, episode_number):
                 return row
 
     # 4) Path matches SxxEyy, ``4x26``, etc.
@@ -247,16 +288,25 @@ def _pick_manual_row(
     if path_hints:
         best: dict[str, Any] | None = None
         best_score = 0
+        expanded = _expand_path_hints(path_hints)
         for row in narrowed:
             blob = _manual_row_path_blob(row)
-            for hint in sorted({h.strip() for h in path_hints if len(h.strip()) > 3}, key=len, reverse=True):
+            fold_blob = re.sub(r"[^a-z0-9]+", "", blob)
+            for hint in expanded:
                 hl = hint.lower().strip().replace("\\", "/")
                 _token = re.fullmatch(r"s\d{1,2}e\d{1,3}", hl)
                 min_len = 4 if _token else 8
+                scored = 0
                 if len(hl) >= min_len and hl in blob:
-                    if len(hl) > best_score:
-                        best_score = len(hl)
-                        best = row
+                    scored = len(hl)
+                else:
+                    hf = re.sub(r"[^a-z0-9]+", "", hl)
+                    # Avoid tiny collisions (``media``, ``season``); require long release-shaped tokens
+                    if len(hf) >= 14 and hf in fold_blob:
+                        scored = len(hf)
+                if scored > best_score:
+                    best_score = scored
+                    best = row
         if best is not None:
             return best
 

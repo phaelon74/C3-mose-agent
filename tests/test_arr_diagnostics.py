@@ -37,6 +37,26 @@ def test_policy_read_counts_match_plan() -> None:
     assert len(mp._RADARR_DIAG_READS) == 23  # noqa: SLF001
 
 
+def test_manual_import_hints_match_folded_when_punctuation_differs() -> None:
+    """Dots vs underscores in filenames still match queue release name hints."""
+    from arr_diagnostics.sonarr_manual_import import _pick_manual_row
+
+    rows = [
+        {"seriesId": 1, "path": "/mnt/DL/MPACT_x_Nightline_S04E26/foo.mkv", "episodes": []},
+        {"seriesId": 1, "path": "/mnt/DL/other/show.mkv", "episodes": []},
+    ]
+    picked = _pick_manual_row(
+        rows,
+        1,
+        999,
+        download_id=None,
+        season_number=4,
+        episode_number=26,
+        path_hints=["MPACT.x.Nightline.S04E26"],
+    )
+    assert picked is rows[0]
+
+
 def test_manual_import_row_picked_by_nested_season_episode() -> None:
     """When episode id is missing on manualimport rows, match S/E on nested episodes."""
     from arr_diagnostics.sonarr_manual_import import _pick_manual_row
