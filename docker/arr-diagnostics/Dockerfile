@@ -11,6 +11,7 @@ COPY docker/arr-diagnostics/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY docker/arr-diagnostics/arr_diagnostics ./arr_diagnostics
+COPY docker/arr-diagnostics/scripts ./scripts
 
 ENV PYTHONPATH=/opt/arr-diagnostics
 ENV PYTHONUNBUFFERED=1

@@ -540,10 +540,10 @@ as other protected MCP servers (see D.6).
   (see `config.toml`; default is **200**) or omit servers you do not enable in
   `inline_mcp_servers`.
 
-Smoke-check from a running Sonarr diagnostics container (uses **httpx** from the image; `curl` is not installed):
+Smoke-check from a running Sonarr diagnostics container (uses **httpx** from the image; `curl` is not installed). Use **`-T`** when piping or using a heredoc so Docker does not require a terminal (`stdin is not a terminal`):
 
 ```bash
-docker compose exec -i sonarr-diagnostics python - <<'PY'
+docker compose exec -T sonarr-diagnostics python - <<'PY'
 import os
 
 import httpx
@@ -557,6 +557,16 @@ r.raise_for_status()
 print(r.json())
 PY
 ```
+
+End-to-end **queue import** (matches `POST /api/v3/queue/import`; same payload shape as MCP `sonarr_post_queue_import`). Script: [`docker/arr-diagnostics/scripts/sonarr_import_episode.py`](docker/arr-diagnostics/scripts/sonarr_import_episode.py), installed in-image at **`/opt/arr-diagnostics/scripts/`**. Example for **IMPACT x Nightline S04E26**:
+
+```bash
+docker compose exec -T sonarr-diagnostics \
+  python /opt/arr-diagnostics/scripts/sonarr_import_episode.py \
+  --series "IMPACT x Nightline" --season 4 --episode 26
+```
+
+Use `--dry-run` to print `seriesId`, `episodeId`, `downloadId`, and JSON payload without posting. Override import mode with `--import-mode move` if needed; add `--should-grab` only when appropriate. **Rebuild** the `sonarr-diagnostics` image after updating the repo so the script copy is fresh.
 
 ### D.4 Optional Trakt (niavasha only)
 
