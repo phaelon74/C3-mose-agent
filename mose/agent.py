@@ -131,7 +131,7 @@ Use for multi-step research, complex file operations, or anything that benefits 
 and iterates on failures. Use for scripts, scrapers, automation, or any task requiring write-run-fix cycles. \
 Prefer this over delegate for coding work.
 - **Integrated backends (MCP)**: Tools named ``server__tool`` (for example ``plex-ops-admin__sessions_get_active``, \
-``sonarr-diagnostics__sonarr_get_queue``, ``radarr-diagnostics__radarr_get_queue``) \
+``sonarr-diagnostics__sonarr_get_queue``, ``sonarr-diagnostics__sonarr_post_queue_import``, ``radarr-diagnostics__radarr_get_queue``, ``radarr-diagnostics__radarr_post_queue_import``) \
 call Plex, Sonarr, Radarr, and other MCP backends. **Prefer these** for those systems. Do not use ``bash``/``curl`` \
 to reach those services — credentials and policy are not available in the shell.
 - **list_available_tools / use_tool**: When these appear in your tool list (MCP inlining disabled in config), \

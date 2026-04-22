@@ -76,6 +76,25 @@ class ArrClient:
             return None
         return r.json()
 
+    def post_json_documented_error(self, path: str, body: Any | None = None) -> str:
+        """POST JSON and return ``json_response`` output or a structured HTTP error string."""
+        url = f"{self.base}/api/v3{path}"
+        r = self._client.post(url, json=body)
+        if r.is_success:
+            if not r.content:
+                return json.dumps({"http_status": r.status_code, "body": None})
+            try:
+                return json_response(r.json())
+            except Exception:
+                return json.dumps({"http_status": r.status_code, "body": r.text[:20000]})
+        text = (r.text or "")[:8000]
+        err: dict[str, Any] = {
+            "error": "http_error",
+            "http_status": r.status_code,
+            "body": text,
+        }
+        return json.dumps(err, indent=2)
+
 
 def truncate_output(text: str, max_lines: int = 200, max_chars: int = 20000) -> str:
     lines = text.splitlines()

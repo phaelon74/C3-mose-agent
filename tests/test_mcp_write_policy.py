@@ -43,6 +43,7 @@ def test_plex_stack_automation(bare: str, expected: str) -> None:
         ("sonarr_command_RssSync", "write"),
         ("sonarr_post_system_shutdown", "write"),
         ("sonarr_get_series_by_id", "read"),
+        ("sonarr_post_queue_import", "write"),
     ],
 )
 def test_sonarr_diagnostics(bare: str, expected: str) -> None:
@@ -57,6 +58,8 @@ def test_sonarr_diagnostics(bare: str, expected: str) -> None:
         ("radarr_command_RssSync", "write"),
         ("radarr_post_indexer_test", "write"),
         ("radarr_get_health", "read"),
+        ("radarr_post_queue_import", "write"),
+        ("radarr_post_manual_import", "write"),
     ],
 )
 def test_radarr_diagnostics(bare: str, expected: str) -> None:

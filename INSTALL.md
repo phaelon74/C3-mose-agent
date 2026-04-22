@@ -523,7 +523,9 @@ The repository builds a small Python MCP image ([`docker/arr-diagnostics/`](dock
 with one **shared** API client and **two** stdio entrypoints: `mcp-entrypoint-sonarr` and
 `mcp-entrypoint-radarr`. They expose `sonarr_*` and `radarr_*` tools (queue, health, logs,
 manual import, history, library file reads, disk/filesystem, system, indexer and
-download-client test, and a small set of `*arr` `command` names). **Write** tools
+download-client test, **queue import** (`sonarr_post_queue_import` / `radarr_post_queue_import`
+— `POST /queue/import`; Radarr also exposes `radarr_post_manual_import` for `POST /manualimport`),
+and a small set of `*arr` `command` names). **Write** tools
 (restart, shutdown, queue delete, `RssSync`, etc.) require the same Signal admin approval
 as other protected MCP servers (see D.6).
 
@@ -532,7 +534,7 @@ as other protected MCP servers (see D.6).
   `plex-stack-automation` is still the main path.
 - **Container names:** `mose-sonarr-diagnostics`, `mose-radarr-diagnostics` (see
   `mcp_servers.example.json` and `docker compose` service names).
-- **Approximate tool count:** about **37** `sonarr-diagnostics` tools and **35**
+- **Approximate tool count:** about **38** `sonarr-diagnostics` tools and **37**
   `radarr-diagnostics` tools. With `plex-ops-admin`, `plex-stack-automation`, and both arr
   servers inlined, merged tool schemas exceed **80** — raise `inline_mcp_tools_soft_cap`
   (see `config.toml`; default is **200**) or omit servers you do not enable in
