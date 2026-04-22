@@ -85,6 +85,134 @@ def test_manual_import_row_picked_by_nested_season_episode() -> None:
     assert picked is rows[1]
 
 
+def test_build_manual_import_command_file_extracts_expected_keys() -> None:
+    """``/command`` ManualImport file payload carries only Sonarr's ManualImportFile fields."""
+    from arr_diagnostics.sonarr_manual_import import build_manual_import_command_file
+
+    validated_row = {
+        "path": "/media/dload/X/file.mkv",
+        "folderName": "X",
+        "seriesId": 2644,
+        "episodeFileId": 0,
+        "quality": {"quality": {"id": 3}},
+        "languages": [{"id": 1}],
+        "releaseGroup": "VCR",
+        "downloadId": "abc",
+        "indexerFlags": 0,
+        "releaseType": "singleEpisode",
+        "customFormats": [{"id": 1}],
+        "rejections": [],
+        "id": 1234,
+        "episodes": [{"id": 172292}],
+    }
+    file_payload = build_manual_import_command_file(validated_row, [172292])
+    assert file_payload["path"] == "/media/dload/X/file.mkv"
+    assert file_payload["seriesId"] == 2644
+    assert file_payload["episodeIds"] == [172292]
+    assert file_payload["downloadId"] == "abc"
+    assert "rejections" not in file_payload
+    assert "id" not in file_payload
+    assert "episodes" not in file_payload
+
+
+def test_manual_import_commit_fires_command_after_validation() -> None:
+    """End-to-end: reprocess validates (rejections=[]) then POST /command is called."""
+    import json as _json
+
+    from arr_diagnostics import sonarr_manual_import as smi
+
+    calls: list[tuple[str, object]] = []
+
+    validated_row = {
+        "path": "/media/dload/x/file.mkv",
+        "folderName": "x",
+        "seriesId": 2644,
+        "quality": {"quality": {"id": 3}},
+        "languages": [{"id": 1}],
+        "releaseGroup": "VCR",
+        "downloadId": "abc",
+        "indexerFlags": 0,
+        "releaseType": "singleEpisode",
+        "customFormats": [],
+        "rejections": [],
+        "episodes": [{"id": 172292, "seasonNumber": 4, "episodeNumber": 26}],
+    }
+
+    class _Client:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            calls.append(("GET", path))
+            return [validated_row]
+
+        def post_json_documented_error(self, path: str, body: object | None = None) -> str:
+            calls.append(("POST", path))
+            if path == "/manualimport":
+                return _json.dumps([validated_row])
+            if path == "/command":
+                return _json.dumps({"id": 9999, "name": "ManualImport", "status": "queued"})
+            raise AssertionError(f"unexpected POST {path}")
+
+    out = smi.manual_import_commit(
+        _Client(),  # type: ignore[arg-type]
+        {
+            "downloadId": "abc",
+            "seriesId": 2644,
+            "episodeIds": [172292],
+            "seasonNumber": 4,
+            "episodeNumber": 26,
+        },
+    )
+    assert "ManualImport" in out or "queued" in out
+    assert ("POST", "/manualimport") in calls
+    assert ("POST", "/command") in calls
+
+
+def test_manual_import_commit_halts_on_rejections() -> None:
+    """If reprocess returns rejections, we must NOT POST /command."""
+    import json as _json
+
+    from arr_diagnostics import sonarr_manual_import as smi
+
+    posts: list[str] = []
+
+    class _Client:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            return [
+                {
+                    "path": "/x/y.mkv",
+                    "seriesId": 2644,
+                    "episodes": [{"id": 172292, "seasonNumber": 4, "episodeNumber": 26}],
+                    "rejections": [],
+                },
+            ]
+
+        def post_json_documented_error(self, path: str, body: object | None = None) -> str:
+            posts.append(path)
+            if path == "/manualimport":
+                return _json.dumps([
+                    {
+                        "path": "/x/y.mkv",
+                        "seriesId": 2644,
+                        "episodes": [{"id": 172292}],
+                        "rejections": [{"reason": "Unknown series", "type": "permanent"}],
+                    },
+                ])
+            raise AssertionError(f"should not POST {path} when rejected")
+
+    out = smi.manual_import_commit(
+        _Client(),  # type: ignore[arg-type]
+        {
+            "downloadId": "abc",
+            "seriesId": 2644,
+            "episodeIds": [172292],
+            "seasonNumber": 4,
+            "episodeNumber": 26,
+        },
+    )
+    data = _json.loads(out)
+    assert data.get("error") == "manualimport_rejected"
+    assert posts == ["/manualimport"]
+
+
 def test_prepare_row_queries_downloadid_only() -> None:
     """Sonarr ignores downloadId when seriesId is also passed (library/season scan returned).
 

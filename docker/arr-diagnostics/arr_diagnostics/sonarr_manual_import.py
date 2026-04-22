@@ -1,8 +1,15 @@
-"""Sonarr v3 manual import commit: GET /manualimport → POST /manualimport.
+"""Sonarr v3 manual import commit: GET /manualimport → POST /manualimport → POST /command.
 
-Upstream Sonarr exposes ``POST /api/v3/manualimport`` with an array of
-``ManualImportReprocessResource``. The non-standard ``POST /queue/import`` route
-used elsewhere returns **405** on stock Sonarr builds.
+Sonarr splits manual import into two stages:
+
+1. ``GET /api/v3/manualimport?downloadId=<id>`` returns ``ManualImportResource`` rows,
+   and ``POST /api/v3/manualimport`` with the reprocess array only **validates** the
+   rows (populates ``rejections`` / derived metadata). It does NOT commit the import.
+2. Actual import is fired by ``POST /api/v3/command`` with command name
+   ``ManualImport``, supplying the validated file list. Sonarr then runs the
+   ManualImport command which moves/hardlinks the file and clears the queue row.
+
+The non-standard ``POST /queue/import`` route returns **405** on stock Sonarr.
 """
 
 from __future__ import annotations
@@ -32,16 +39,69 @@ _REPROCESS_KEYS = frozenset({
 
 
 def post_manual_import_reprocess(c: ArrClient, reprocess: dict[str, Any]) -> str:
-    """POST a single ``ManualImportReprocessResource`` (wrapped in a one-element array)."""
+    """POST a single ``ManualImportReprocessResource`` (wrapped in a one-element array).
+
+    NOTE: This is **validation only**. Sonarr returns the reprocessed rows with
+    populated ``rejections`` but does NOT actually import. Use
+    :func:`execute_manual_import_command` to commit.
+    """
     return c.post_json_documented_error("/manualimport", [reprocess])
 
 
+_COMMAND_FILE_KEYS = (
+    "path",
+    "folderName",
+    "seriesId",
+    "episodeIds",
+    "quality",
+    "languages",
+    "releaseGroup",
+    "downloadId",
+    "episodeFileId",
+    "indexerFlags",
+    "releaseType",
+    "customFormats",
+)
+
+
+def build_manual_import_command_file(
+    validated_row: dict[str, Any],
+    episode_ids: list[int],
+) -> dict[str, Any]:
+    """Extract a ``ManualImportFile`` suitable for ``POST /command`` from a validated row."""
+    out: dict[str, Any] = {}
+    for k in _COMMAND_FILE_KEYS:
+        if k in validated_row and validated_row[k] is not None:
+            out[k] = validated_row[k]
+    out["episodeIds"] = list(episode_ids)
+    return out
+
+
+def execute_manual_import_command(
+    c: ArrClient,
+    files: list[dict[str, Any]],
+    *,
+    import_mode: str = "auto",
+) -> str:
+    """Fire ``POST /command`` with name=ManualImport to actually commit the import.
+
+    ``import_mode`` is one of ``"auto"`` (default, hardlink+fallback to copy),
+    ``"move"`` or ``"copy"`` — matches Sonarr's ``Services/ImportMode.cs``.
+    """
+    body = {
+        "name": "ManualImport",
+        "importMode": import_mode,
+        "files": files,
+    }
+    return c.post_json_documented_error("/command", body)
+
+
 def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
-    """Import a queued download via GET /manualimport then POST /manualimport.
+    """Import a queued download end-to-end: GET /manualimport → POST /manualimport → POST /command.
 
     ``payload_dict`` uses the same logical fields as the old queue/import helper:
-    ``downloadId``, ``seriesId``, ``episodeIds`` (non-empty list). Nested
-    ``options`` is ignored (copy/move is chosen in Sonarr UI / defaults).
+    ``downloadId``, ``seriesId``, ``episodeIds`` (non-empty list). Optional
+    ``importMode`` (``auto|move|copy``, default ``auto``).
     """
     download_id = payload_dict.get("downloadId")
     series_id = payload_dict.get("seriesId")
@@ -54,6 +114,9 @@ def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
     eids = [int(x) for x in episode_ids]
     season_num = payload_dict.get("seasonNumber")
     episode_num = payload_dict.get("episodeNumber")
+    import_mode = str(payload_dict.get("importMode") or "auto").lower()
+    if import_mode not in {"auto", "move", "copy"}:
+        import_mode = "auto"
     raw_hints = payload_dict.get("pathHints")
     path_hints: list[str] | None = None
     if isinstance(raw_hints, list):
@@ -72,7 +135,40 @@ def manual_import_commit(c: ArrClient, payload_dict: dict[str, Any]) -> str:
     if isinstance(prep, str):
         return prep
     _rows, reprocess = prep
-    return c.post_json_documented_error("/manualimport", [reprocess])
+
+    # Stage 1: validate (populate rejections). Parse response to check eligibility.
+    reprocess_raw = c.post_json_documented_error("/manualimport", [reprocess])
+    try:
+        validated = json.loads(reprocess_raw)
+    except json.JSONDecodeError:
+        return json.dumps({
+            "error": "manualimport_reprocess_unparseable",
+            "raw": reprocess_raw[:2000],
+        })
+    if isinstance(validated, dict) and validated.get("error"):
+        return reprocess_raw
+    validated_rows = validated if isinstance(validated, list) else [validated]
+    if not validated_rows or not isinstance(validated_rows[0], dict):
+        return json.dumps({
+            "error": "manualimport_reprocess_no_rows",
+            "hint": "Sonarr returned no validated rows from POST /manualimport.",
+        })
+    row0 = validated_rows[0]
+    rejections = row0.get("rejections") or []
+    if rejections:
+        return json.dumps({
+            "error": "manualimport_rejected",
+            "rejections": rejections,
+            "hint": (
+                "Sonarr rejected the row during reprocess (e.g. series mismatch, monitored state, "
+                "custom format score). Resolve in Sonarr UI or fix mapping before retrying."
+            ),
+        })
+
+    # Stage 2: actually commit via ManualImport command.
+    file_payload = build_manual_import_command_file(row0, eids)
+    cmd_raw = execute_manual_import_command(c, [file_payload], import_mode=import_mode)
+    return cmd_raw
 
 
 def prepare_manual_import_payload(

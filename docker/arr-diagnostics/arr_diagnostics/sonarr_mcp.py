@@ -125,7 +125,7 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
 
     @mcp.tool()
     def sonarr_post_queue_import(payload: str) -> str:
-        """Commit import for a queued/blocked release via Sonarr v3 **GET+POST /manualimport** (not ``/queue/import``, which stock Sonarr does not expose). ``payload`` JSON: ``downloadId``, ``seriesId``, ``episodeIds`` (list). Optional: ``seasonNumber``, ``episodeNumber`` to disambiguate when GET /manualimport returns many files. Legacy ``options`` keys are ignored. Requires approval — distinct from ``sonarr_command_ManualImport`` (background command)."""
+        """Commit import for a queued/blocked release via Sonarr v3 **GET /manualimport → POST /manualimport (validate) → POST /command {name: ManualImport} (commit)**. The standalone ``POST /manualimport`` is validation only; the actual import fires via the Command API. ``payload`` JSON: ``downloadId``, ``seriesId``, ``episodeIds`` (list). Optional: ``seasonNumber``, ``episodeNumber``, ``pathHints``, ``importMode`` (``auto``|``move``|``copy``). Halts with ``manualimport_rejected`` if Sonarr's validation returns rejections. Requires approval."""
         try:
             body = json.loads(payload)
         except json.JSONDecodeError as e:

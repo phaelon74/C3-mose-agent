@@ -63,6 +63,12 @@ def main() -> None:
         default=5,
         help="Max rows printed by --debug-rows per GET (default: 5).",
     )
+    p.add_argument(
+        "--import-mode",
+        choices=("auto", "move", "copy"),
+        default="auto",
+        help="Sonarr ManualImport mode (default: auto = hardlink or copy fallback).",
+    )
     args = p.parse_args()
 
     url_raw = os.environ.get("SONARR_URL", "").strip()
@@ -76,6 +82,8 @@ def main() -> None:
     # Import after env check so --help works without PYTHONPATH package
     from arr_diagnostics.client import ArrClient
     from arr_diagnostics.sonarr_manual_import import (
+        build_manual_import_command_file,
+        execute_manual_import_command,
         post_manual_import_reprocess,
         prepare_manual_import_payload,
     )
@@ -188,14 +196,43 @@ def main() -> None:
             if args.dry_run:
                 return
 
-            out = post_manual_import_reprocess(client, reprocess)
-            print(out)
+            # --- Stage 1: POST /manualimport (reprocess = validate; populates rejections) ---
+            reprocess_raw = post_manual_import_reprocess(client, reprocess)
+            print("POST /manualimport response (validation):")
+            print(reprocess_raw)
             try:
-                err_probe = json.loads(out)
+                validated = json.loads(reprocess_raw)
             except json.JSONDecodeError:
-                err_probe = {}
-            if isinstance(err_probe, dict) and err_probe.get("error") == "http_error":
+                print("Could not parse /manualimport response as JSON.", file=sys.stderr)
                 sys.exit(7)
+            if isinstance(validated, dict) and validated.get("error") == "http_error":
+                sys.exit(7)
+            validated_rows = validated if isinstance(validated, list) else [validated]
+            if not validated_rows or not isinstance(validated_rows[0], dict):
+                print("Sonarr returned no validated rows.", file=sys.stderr)
+                sys.exit(7)
+            row0 = validated_rows[0]
+            rejections = row0.get("rejections") or []
+            if rejections:
+                print("Sonarr rejected the row; not committing:", file=sys.stderr)
+                print(json.dumps(rejections, indent=2), file=sys.stderr)
+                sys.exit(8)
+
+            # --- Stage 2: POST /command {name: "ManualImport", files: [...]} (actual commit) ---
+            file_payload = build_manual_import_command_file(row0, [episode_id])
+            print("POST /command body:", json.dumps(
+                {"name": "ManualImport", "importMode": args.import_mode, "files": [file_payload]},
+                indent=2,
+            ))
+            cmd_raw = execute_manual_import_command(client, [file_payload], import_mode=args.import_mode)
+            print("POST /command response:")
+            print(cmd_raw)
+            try:
+                cmd_probe = json.loads(cmd_raw)
+            except json.JSONDecodeError:
+                cmd_probe = {}
+            if isinstance(cmd_probe, dict) and cmd_probe.get("error") == "http_error":
+                sys.exit(9)
         finally:
             http.close()
     finally:
