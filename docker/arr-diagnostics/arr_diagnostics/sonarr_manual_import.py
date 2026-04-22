@@ -107,14 +107,14 @@ def _prepare_row(
     episode_number: int | None = None,
     path_hints: list[str] | None = None,
 ) -> tuple[list[Any], dict[str, Any]] | str:
-    params: dict[str, Any] = {"downloadId": download_id, "seriesId": series_id}
-    if season_number is not None:
-        params["seasonNumber"] = season_number
-    rows_any = c.get_json("/manualimport", params)
+    # IMPORTANT: Sonarr ignores ``downloadId`` when ``seriesId`` is also sent — it falls back
+    # to a library/season scan (often 100+ rows). Use ``downloadId`` **alone** to get the
+    # single pending row for the unmatched release.
+    rows_any = c.get_json("/manualimport", {"downloadId": download_id})
     if not rows_any:
         return json.dumps({
             "error": "manualimport_get_empty",
-            "hint": "Nothing returned for this downloadId/seriesId — release may have left the queue.",
+            "hint": "GET /manualimport?downloadId=... returned nothing — release may have left the queue.",
         })
     rows = rows_any if isinstance(rows_any, list) else [rows_any]
     row = _pick_manual_row(
@@ -125,29 +125,13 @@ def _prepare_row(
         episode_number=episode_number,
         path_hints=path_hints,
     )
-    # Season filter on GET can omit unmapped rows; retry without ``seasonNumber``.
-    if row is None and season_number is not None:
-        loose_any = c.get_json(
-            "/manualimport",
-            {"downloadId": download_id, "seriesId": series_id},
-        )
-        if loose_any:
-            rows = loose_any if isinstance(loose_any, list) else [loose_any]
-            row = _pick_manual_row(
-                rows,
-                series_id,
-                episode_id,
-                season_number=season_number,
-                episode_number=episode_number,
-                path_hints=path_hints,
-            )
     if row is None:
         return json.dumps({
             "error": "no_matching_manualimport_row",
             "candidates_after_get": len(rows),
             "hint": (
-                "No row matched hints or S/E; try GET /manualimport without seasonNumber (done automatically), "
-                "or pass pathHints. Episode ids on rows may be strings — matching uses int coercion."
+                "GET /manualimport?downloadId=<id> returned rows but none matched. Check --debug-rows; "
+                "series may be misidentified (grab history says matched-by-id; rename/rescan may be needed)."
             ),
         })
     return rows, _to_reprocess(row, [episode_id])

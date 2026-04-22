@@ -85,6 +85,53 @@ def test_manual_import_row_picked_by_nested_season_episode() -> None:
     assert picked is rows[1]
 
 
+def test_prepare_row_queries_downloadid_only() -> None:
+    """Sonarr ignores downloadId when seriesId is also passed (library/season scan returned).
+
+    Regression test: ``_prepare_row`` MUST call ``GET /manualimport`` with ``downloadId`` only.
+    """
+    from arr_diagnostics import sonarr_manual_import as smi
+
+    captured: list[dict[str, object]] = []
+
+    class _FakeClient:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            captured.append({"path": path, "params": params or {}})
+            return [
+                {
+                    "seriesId": 2644,
+                    "downloadId": "abc",
+                    "path": "/media/dload/Release.S04E26/file.mkv",
+                    "episodes": [
+                        {
+                            "id": 172292,
+                            "seasonNumber": 4,
+                            "episodeNumber": 26,
+                        },
+                    ],
+                    "seasonNumber": 4,
+                },
+            ]
+
+        def post_json_documented_error(self, *_a: object, **_k: object) -> str:  # pragma: no cover - not used
+            raise AssertionError("should not POST in prepare step")
+
+    prep = smi._prepare_row(  # noqa: SLF001
+        _FakeClient(),  # type: ignore[arg-type]
+        "abc",
+        2644,
+        172292,
+        season_number=4,
+        episode_number=26,
+        path_hints=None,
+    )
+    assert isinstance(prep, tuple)
+    assert len(captured) == 1
+    got = captured[0]
+    assert got["path"] == "/manualimport"
+    assert got["params"] == {"downloadId": "abc"}
+
+
 def test_build_apps_do_not_raise() -> None:
     from arr_diagnostics.client import ArrClient
     from arr_diagnostics.radarr_mcp import build_radarr_app
