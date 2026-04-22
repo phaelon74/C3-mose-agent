@@ -44,6 +44,25 @@ def main() -> None:
     p.add_argument("--season", type=int, required=True)
     p.add_argument("--episode", type=int, required=True)
     p.add_argument("--dry-run", action="store_true", help="Print GET + POST payload only; do not commit")
+    p.add_argument(
+        "--debug-rows",
+        action="store_true",
+        help=(
+            "Dump raw /manualimport rows as JSON (downloadId-only, then +seasonNumber variant) "
+            "and exit before POST. Use this to diagnose 'no_matching_manualimport_row'."
+        ),
+    )
+    p.add_argument(
+        "--dump-queue-rec",
+        action="store_true",
+        help="Also print the raw queue record that resolved downloadId.",
+    )
+    p.add_argument(
+        "--debug-row-limit",
+        type=int,
+        default=5,
+        help="Max rows printed by --debug-rows per GET (default: 5).",
+    )
     args = p.parse_args()
 
     url_raw = os.environ.get("SONARR_URL", "").strip()
@@ -134,6 +153,22 @@ def main() -> None:
             if path_hints:
                 print(f"path_hints={path_hints!r}")
 
+            if args.dump_queue_rec:
+                print("=== queue record (raw) ===")
+                print(json.dumps(queue_rec, indent=2, sort_keys=True))
+
+            if args.debug_rows:
+                _debug_dump_manualimport(
+                    http,
+                    api,
+                    series_id=series_id,
+                    download_id=str(download_id),
+                    season=args.season,
+                    episode=args.episode,
+                    limit=max(1, int(args.debug_row_limit)),
+                )
+                return
+
             prep = prepare_manual_import_payload(
                 client,
                 str(download_id),
@@ -165,6 +200,106 @@ def main() -> None:
             http.close()
     finally:
         client.close()
+
+
+def _debug_dump_manualimport(
+    http: Any,
+    api: str,
+    *,
+    series_id: int,
+    download_id: str,
+    season: int,
+    episode: int,
+    limit: int,
+) -> None:
+    """Dump raw GET /manualimport responses (several filter variants) for diagnosis."""
+    variants: list[tuple[str, dict[str, Any]]] = [
+        (
+            "downloadId+seriesId",
+            {"downloadId": download_id, "seriesId": series_id},
+        ),
+        (
+            "downloadId+seriesId+seasonNumber",
+            {"downloadId": download_id, "seriesId": series_id, "seasonNumber": season},
+        ),
+        (
+            "downloadId only",
+            {"downloadId": download_id},
+        ),
+    ]
+    print("=== GET /manualimport variants ===")
+    for label, params in variants:
+        try:
+            r = http.get(f"{api}/manualimport", params=params)
+            print(f"\n--- {label} -> HTTP {r.status_code}  params={params} ---")
+            if not r.is_success:
+                print(r.text[:2000])
+                continue
+            data = r.json()
+            if not isinstance(data, list):
+                data = [data] if data else []
+            print(f"row_count={len(data)}")
+            _summarize_rows(data, series_id=series_id, season=season, episode=episode)
+            print("--- sample rows (full JSON) ---")
+            for row in data[:limit]:
+                print(json.dumps(row, indent=2, sort_keys=True))
+                print("---")
+        except Exception as e:  # noqa: BLE001
+            print(f"[error] variant {label!r}: {e!r}")
+    print("\nHint: grep sample rows for the expected release name. If it's absent, "
+          "the real episode is not being returned by /manualimport for this downloadId.")
+
+
+def _summarize_rows(
+    rows: list[Any],
+    *,
+    series_id: int,
+    season: int,
+    episode: int,
+) -> None:
+    """Compact per-row summary: keys present, seriesId, season/episode hints, short path."""
+    matching_series = 0
+    matching_season = 0
+    matching_episode = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("seriesId")
+        if sid is None and isinstance(row.get("series"), dict):
+            sid = row["series"].get("id")
+        if sid is not None and str(sid) == str(series_id):
+            matching_series += 1
+        rs = row.get("seasonNumber")
+        if rs is not None and str(rs) == str(season):
+            matching_season += 1
+        eps = row.get("episodes") or []
+        for er in eps:
+            if not isinstance(er, dict):
+                continue
+            if str(er.get("seasonNumber")) == str(season) and str(er.get("episodeNumber")) == str(episode):
+                matching_episode += 1
+                break
+    print(
+        f"summary: rows_with_seriesId_match={matching_series}  "
+        f"row_season_match={matching_season}  "
+        f"nested_episode_SxxEyy_match={matching_episode}",
+    )
+    for i, row in enumerate(rows[:25]):
+        if not isinstance(row, dict):
+            continue
+        keys = sorted(row.keys())
+        sid = row.get("seriesId")
+        if sid is None and isinstance(row.get("series"), dict):
+            sid = row["series"].get("id")
+        path = row.get("path") or row.get("relativePath") or row.get("name") or ""
+        rs = row.get("seasonNumber")
+        ep_info: list[str] = []
+        for er in row.get("episodes") or []:
+            if isinstance(er, dict):
+                ep_info.append(f"{er.get('seasonNumber')}x{er.get('episodeNumber')}#{er.get('id')}")
+        print(
+            f"  row[{i}] seriesId={sid} season={rs} eps={ep_info}  path={path!r}  keys={keys}",
+        )
 
 
 def _resolve_queue_record(http: Any, api: str, series_id: int, episode_id: int) -> dict[str, Any] | None:

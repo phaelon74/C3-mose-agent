@@ -121,18 +121,33 @@ def _prepare_row(
         rows,
         series_id,
         episode_id,
-        download_id=download_id,
         season_number=season_number,
         episode_number=episode_number,
         path_hints=path_hints,
     )
+    # Season filter on GET can omit unmapped rows; retry without ``seasonNumber``.
+    if row is None and season_number is not None:
+        loose_any = c.get_json(
+            "/manualimport",
+            {"downloadId": download_id, "seriesId": series_id},
+        )
+        if loose_any:
+            rows = loose_any if isinstance(loose_any, list) else [loose_any]
+            row = _pick_manual_row(
+                rows,
+                series_id,
+                episode_id,
+                season_number=season_number,
+                episode_number=episode_number,
+                path_hints=path_hints,
+            )
     if row is None:
         return json.dumps({
             "error": "no_matching_manualimport_row",
             "candidates_after_get": len(rows),
             "hint": (
-                "Rebuild sonarr-diagnostics so scripts pass pathHints; or ensure seasonNumber/episodeNumber "
-                "match nested episodes on /manualimport rows. Rows often map by S/E on episodes[], not id."
+                "No row matched hints or S/E; try GET /manualimport without seasonNumber (done automatically), "
+                "or pass pathHints. Episode ids on rows may be strings — matching uses int coercion."
             ),
         })
     return rows, _to_reprocess(row, [episode_id])
@@ -168,29 +183,28 @@ def _expand_path_hints(path_hints: list[str]) -> list[str]:
     return sorted(ordered, key=len, reverse=True)
 
 
-def _manual_row_path_blob(row: dict[str, Any]) -> str:
-    """Concatenate filename-related strings for regex / substring matching."""
-    parts: list[str] = []
-    for k in (
-        "path",
-        "relativePath",
-        "name",
-        "folderName",
-        "releaseGroup",
-        "releaseTitle",
-        "simpleReleaseTitle",
-    ):
-        v = row.get(k)
-        if isinstance(v, str) and v:
-            parts.append(v)
-    for er in row.get("episodes") or []:
-        if isinstance(er, dict):
-            for k in ("title", "releaseTitle"):
-                tv = er.get(k)
-                if isinstance(tv, str) and tv:
-                    parts.append(tv)
-    blob = "\0".join(parts).replace("\\", "/").lower()
-    return blob
+def _manual_row_hint_blob(row: dict[str, Any], *, max_chars: int = 16000) -> str:
+    """All string leaves in the row JSON — Sonarr nests paths differently per version."""
+    buf: list[str] = []
+    total = 0
+
+    def walk(o: Any, depth: int) -> None:
+        nonlocal total
+        if depth > 14 or total >= max_chars:
+            return
+        if isinstance(o, str):
+            if o.strip():
+                buf.append(o)
+                total += len(o)
+        elif isinstance(o, dict):
+            for v in o.values():
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for item in o:
+                walk(item, depth + 1)
+
+    walk(row, 0)
+    return ("\0".join(buf)).replace("\\", "/").lower()
 
 
 def _pick_manual_row(
@@ -198,7 +212,6 @@ def _pick_manual_row(
     series_id: int,
     episode_id: int,
     *,
-    download_id: str | None = None,
     season_number: int | None,
     episode_number: int | None,
     path_hints: list[str] | None,
@@ -230,20 +243,10 @@ def _pick_manual_row(
     if season_number is not None and not narrowed:
         narrowed = list(pool)
 
-    # 0) Prefer rows whose downloadId matches the GET query (multi-file releases)
-    if download_id and str(download_id).strip():
-        q = str(download_id).strip().lower()
-        with_did = [
-            r for r in narrowed
-            if str(r.get("downloadId") or "").strip().lower() == q
-        ]
-        if with_did:
-            narrowed = with_did
-
     # 1) Episode id appears on a nested episode (correct row for this file)
     for row in narrowed:
         for er in row.get("episodes") or []:
-            if isinstance(er, dict) and er.get("id") == episode_id:
+            if isinstance(er, dict) and _int_eq(er.get("id"), episode_id):
                 return row
 
     # 2) Nested episodes match season/episode numbers (Sonarr often sets S/E before DB id lines up)
@@ -279,7 +282,7 @@ def _pick_manual_row(
             rf"(?i)\b{season_number}[xX]{episode_number}\b",
         ]
         for row in narrowed:
-            path = _manual_row_path_blob(row)
+            path = _manual_row_hint_blob(row)
             for pat in patterns:
                 if re.search(pat, path, re.I):
                     return row
@@ -290,7 +293,7 @@ def _pick_manual_row(
         best_score = 0
         expanded = _expand_path_hints(path_hints)
         for row in narrowed:
-            blob = _manual_row_path_blob(row)
+            blob = _manual_row_hint_blob(row)
             fold_blob = re.sub(r"[^a-z0-9]+", "", blob)
             for hint in expanded:
                 hl = hint.lower().strip().replace("\\", "/")
@@ -334,7 +337,17 @@ def _to_reprocess(row: dict[str, Any], episode_ids: list[int]) -> dict[str, Any]
     # Drop nested episodes that are not the chosen ids (avoids posting S01E01 with episodeIds [S04E26])
     eps = out.get("episodes")
     if isinstance(eps, list):
-        out["episodes"] = [e for e in eps if isinstance(e, dict) and e.get("id") in episode_ids]
+        def _ep_id_matches(ep: dict[str, Any]) -> bool:
+            eid = ep.get("id")
+            if eid is None:
+                return False
+            try:
+                ei = int(eid)
+            except (TypeError, ValueError):
+                return False
+            return ei in episode_ids
+
+        out["episodes"] = [e for e in eps if isinstance(e, dict) and _ep_id_matches(e)]
         if not out["episodes"]:
             del out["episodes"]
     return out
