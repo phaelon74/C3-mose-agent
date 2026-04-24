@@ -8,6 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from arr_diagnostics.client import ArrClient, json_response, safe_tool_decorator, truncate_output
+from arr_diagnostics.radarr_manual_import import manual_import_commit as radarr_manual_import_commit
 
 RADARR_COMMANDS = frozenset({
     "ManualImport",
@@ -17,6 +18,23 @@ RADARR_COMMANDS = frozenset({
     "RssSync",
     "RefreshMonitoredDownloads",
 })
+
+
+def radarr_manual_import_missing_scope_error(
+    folder: str | None,
+    download_id: str | None,
+    movie_id: int | None,
+) -> str | None:
+    """If all scope params are absent, return a JSON error string; else ``None``."""
+    if folder is None and download_id is None and movie_id is None:
+        return json.dumps({
+            "error": "missing_scope",
+            "hint": (
+                "Pass downloadId (from queue), movieId, or folder — unscoped GET /manualimport "
+                "can return 500 on Radarr."
+            ),
+        })
+    return None
 
 
 def build_radarr_app(c: ArrClient) -> FastMCP:
@@ -93,7 +111,10 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
         movieId: int | None = None,
         filterExistingFiles: bool | None = None,
     ) -> str:
-        """GET /manualimport — optional folder, downloadId, movieId, filterExistingFiles."""
+        """GET /manualimport — pass folder, downloadId, and/or movieId (unscoped GET can 500)."""
+        scope_err = radarr_manual_import_missing_scope_error(folder, downloadId, movieId)
+        if scope_err is not None:
+            return scope_err
         params: dict[str, Any] = {}
         if folder is not None:
             params["folder"] = folder
@@ -115,18 +136,18 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
 
     @tool()
     def radarr_post_queue_import(payload: str) -> str:
-        """POST /queue/import — same route as Sonarr when your Radarr build supports it. ``payload`` is JSON (often downloadId, movieId, options). If the server returns 404, use radarr_post_manual_import with items from GET /manualimport."""
+        """Commit import for a queued/blocked movie via **GET /manualimport → POST /manualimport → POST /command ManualImport** (Radarr v3). ``payload`` JSON: ``downloadId``, ``movieId`` (from queue). Optional: ``importMode`` (``auto``|``move``|``copy``), ``pathHints`` (list). Halts with ``manualimport_rejected`` if reprocess returns rejections. Requires approval."""
         try:
             body = json.loads(payload)
         except json.JSONDecodeError as e:
             return json.dumps({"error": "invalid_json", "detail": str(e)})
         if not isinstance(body, dict):
             return json.dumps({"error": "payload_must_be_a_json_object"})
-        return c.post_json_documented_error("/queue/import", body)
+        return radarr_manual_import_commit(c, body)
 
     @tool()
     def radarr_post_manual_import(payload: str) -> str:
-        """POST /manualimport — body is a JSON array of ManualImportReprocessResource objects (see Radarr API). Use after radarr_get_manual_import to commit imports; distinct from radarr_command_ManualImport."""
+        """POST /manualimport — body is a JSON array of ``ManualImportReprocessResource`` (reprocess/validate only). To commit a queue download end-to-end, use ``radarr_post_queue_import`` with ``downloadId`` and ``movieId``. ``radarr_command_ManualImport`` is a no-arg task trigger, not a per-file commit."""
         try:
             body = json.loads(payload)
         except json.JSONDecodeError as e:

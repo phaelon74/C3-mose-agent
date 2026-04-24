@@ -523,7 +523,7 @@ The repository builds a small Python MCP image ([`docker/arr-diagnostics/`](dock
 with one **shared** API client and **two** stdio entrypoints: `mcp-entrypoint-sonarr` and
 `mcp-entrypoint-radarr`. They expose `sonarr_*` and `radarr_*` tools (queue, health, logs,
 manual import, history, library file reads, disk/filesystem, system, indexer and
-download-client test, **manual import commit** (`sonarr_post_queue_import` — **GET+POST /manualimport**; `radarr_post_queue_import` / `radarr_post_manual_import` for Radarr),
+download-client test, **manual import commit** (`sonarr_post_queue_import` — **GET → POST /manualimport → POST /command**; `radarr_post_queue_import` — same three-step flow for Radarr movies, **not** `POST /queue/import`; `radarr_post_manual_import` is reprocess-only),
 and a small set of `*arr` `command` names). **Write** tools
 (restart, shutdown, queue delete, `RssSync`, etc.) require the same Signal admin approval
 as other protected MCP servers (see D.6).

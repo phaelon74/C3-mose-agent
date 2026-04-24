@@ -37,6 +37,38 @@ def test_post_episode_search_requires_ids() -> None:
     assert _json.loads(out)["error"] == "episodeIds_required"
 
 
+def test_series_lookup_requires_term() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _get_series_lookup
+
+    class _C:
+        def get_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("should not GET without term")
+
+    out = _get_series_lookup(_C(), "   \t")  # type: ignore[arg-type]
+    assert _json.loads(out)["error"] == "term_required"
+
+
+def test_series_lookup_passes_term_param() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _get_series_lookup
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_params: dict[str, object] | None = None
+
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            self.last_params = params or {}
+            return [{"title": "Example"}]
+
+    client = _C()
+    out = _get_series_lookup(client, "  Criminal Record  ")  # type: ignore[arg-type]
+    assert _json.loads(out)[0]["title"] == "Example"
+    assert client.last_params == {"term": "Criminal Record"}
+
+
 def test_post_episode_search_posts_episode_ids() -> None:
     import json as _json
 
@@ -65,7 +97,7 @@ def test_radarr_command_allowlist_length() -> None:
 def test_policy_read_counts_match_plan() -> None:
     from mose import mcp_write_policy as mp
 
-    assert len(mp._SONARR_DIAG_READS) == 25  # noqa: SLF001
+    assert len(mp._SONARR_DIAG_READS) == 26  # noqa: SLF001
     assert len(mp._RADARR_DIAG_READS) == 23  # noqa: SLF001
 
 
@@ -290,6 +322,143 @@ def test_prepare_row_queries_downloadid_only() -> None:
     got = captured[0]
     assert got["path"] == "/manualimport"
     assert got["params"] == {"downloadId": "abc"}
+
+
+def test_radarr_manual_import_missing_scope_error() -> None:
+    import json as _json
+
+    from arr_diagnostics.radarr_mcp import radarr_manual_import_missing_scope_error
+
+    raw = radarr_manual_import_missing_scope_error(None, None, None)
+    assert raw is not None
+    assert _json.loads(raw)["error"] == "missing_scope"
+    assert radarr_manual_import_missing_scope_error("/f", None, None) is None
+    assert radarr_manual_import_missing_scope_error(None, "dl-1", None) is None
+    assert radarr_manual_import_missing_scope_error(None, None, 1) is None
+
+
+def test_radarr_prepare_row_queries_downloadid_only() -> None:
+    """GET /manualimport must use ``downloadId`` alone (no ``movieId`` on GET)."""
+    from arr_diagnostics import radarr_manual_import as rmi
+
+    captured: list[dict[str, object]] = []
+
+    class _FakeClient:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            captured.append({"path": path, "params": params or {}})
+            return [
+                {
+                    "movieId": 42,
+                    "downloadId": "abc",
+                    "path": "/media/dload/Gremlins.2.1990/foo.mkv",
+                    "quality": {"quality": {"id": 1}},
+                    "languages": [{"id": 1}],
+                    "rejections": [],
+                },
+            ]
+
+        def post_json_documented_error(self, *_a: object, **_k: object) -> str:  # pragma: no cover
+            raise AssertionError("should not POST in prepare step")
+
+    prep = rmi._prepare_row(  # noqa: SLF001
+        _FakeClient(),  # type: ignore[arg-type]
+        "abc",
+        42,
+        path_hints=None,
+    )
+    assert isinstance(prep, tuple)
+    assert len(captured) == 1
+    assert captured[0]["path"] == "/manualimport"
+    assert captured[0]["params"] == {"downloadId": "abc"}
+
+
+def test_radarr_manual_import_commit_success() -> None:
+    import json as _json
+
+    from arr_diagnostics import radarr_manual_import as rmi
+
+    calls: list[tuple[str, object]] = []
+
+    validated_row = {
+        "path": "/media/dload/x/movie.mkv",
+        "folderName": "x",
+        "movieId": 99,
+        "quality": {"quality": {"id": 3}},
+        "languages": [{"id": 1}],
+        "releaseGroup": "GRP",
+        "downloadId": "dl1",
+        "indexerFlags": 0,
+        "rejections": [],
+    }
+
+    class _Client:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            calls.append(("GET", path, params or {}))
+            return [validated_row]
+
+        def post_json_documented_error(self, path: str, body: object | None = None) -> str:
+            calls.append(("POST", path, body))
+            if path == "/manualimport":
+                return _json.dumps([validated_row])
+            if path == "/command":
+                return _json.dumps({"id": 7, "name": "ManualImport", "status": "queued"})
+            raise AssertionError(f"unexpected POST {path}")
+
+    out = rmi.manual_import_commit(
+        _Client(),  # type: ignore[arg-type]
+        {"downloadId": "dl1", "movieId": 99},
+    )
+    assert "ManualImport" in out or "queued" in out
+    assert calls[0][0] == "GET" and calls[0][1] == "/manualimport"
+    assert calls[0][2] == {"downloadId": "dl1"}
+    assert ("POST", "/manualimport") in [(c[0], c[1]) for c in calls]
+    assert ("POST", "/command") in [(c[0], c[1]) for c in calls]
+    mi_body = next(c[2] for c in calls if c[0] == "POST" and c[1] == "/manualimport")
+    assert isinstance(mi_body, list) and len(mi_body) == 1
+    cmd_body = next(c[2] for c in calls if c[0] == "POST" and c[1] == "/command")
+    assert cmd_body["name"] == "ManualImport"
+    assert cmd_body["importMode"] == "auto"
+    assert len(cmd_body["files"]) == 1
+    assert cmd_body["files"][0]["movieId"] == 99
+
+
+def test_radarr_manual_import_commit_halts_on_rejections() -> None:
+    import json as _json
+
+    from arr_diagnostics import radarr_manual_import as rmi
+
+    posts: list[str] = []
+
+    class _Client:
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            return [
+                {
+                    "path": "/x/y.mkv",
+                    "movieId": 1,
+                    "downloadId": "d",
+                    "quality": {"quality": {"id": 1}},
+                    "languages": [{"id": 1}],
+                    "rejections": [],
+                },
+            ]
+
+        def post_json_documented_error(self, path: str, body: object | None = None) -> str:
+            posts.append(path)
+            if path == "/manualimport":
+                return _json.dumps([
+                    {
+                        "path": "/x/y.mkv",
+                        "movieId": 1,
+                        "downloadId": "d",
+                        "rejections": [{"reason": "blocked", "type": "permanent"}],
+                    },
+                ])
+            raise AssertionError(f"should not POST {path} when rejected")
+
+    out = rmi.manual_import_commit(_Client(), {"downloadId": "d", "movieId": 1})  # type: ignore[arg-type]
+    data = _json.loads(out)
+    assert data.get("error") == "manualimport_rejected"
+    assert posts == ["/manualimport"]
 
 
 def test_build_apps_do_not_raise() -> None:

@@ -44,6 +44,7 @@ def test_plex_stack_automation(bare: str, expected: str) -> None:
         ("sonarr_post_system_shutdown", "write"),
         ("sonarr_get_series", "read"),
         ("sonarr_get_series_by_id", "read"),
+        ("sonarr_get_series_lookup", "read"),
         ("sonarr_post_queue_import", "write"),
     ],
 )

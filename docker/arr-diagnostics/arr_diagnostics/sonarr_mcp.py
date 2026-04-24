@@ -30,6 +30,17 @@ def _post_episode_search_command(client: ArrClient, episode_ids: list[int]) -> s
     return json_response(client.post_json("/command", {"name": "EpisodeSearch", "episodeIds": episode_ids}))
 
 
+def _get_series_lookup(client: ArrClient, term: str) -> str:
+    """GET ``/series/lookup`` with ``term`` (whitespace-stripped)."""
+    t = term.strip()
+    if not t:
+        return json.dumps({
+            "error": "term_required",
+            "detail": "Pass a non-empty search string (series title).",
+        })
+    return json_response(client.get_json("/series/lookup", {"term": t}))
+
+
 def build_sonarr_app(c: ArrClient) -> FastMCP:
     mcp = FastMCP("sonarr-diagnostics")
     # Every tool below is wrapped so httpx/connection errors return JSON instead
@@ -229,6 +240,11 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
     @tool()
     def sonarr_get_series_folder(id: int) -> str:
         return json_response(c.get_json(f"/series/{id}/folder"))
+
+    @tool()
+    def sonarr_get_series_lookup(term: str) -> str:
+        """GET /series/lookup — metadata search by title (Sonarr indexer/metadata; not your library list). Use to resolve a show name to ``tvdbId`` / canonical title, then match to a library ``id`` from ``sonarr_get_series`` or ``sonarr_get_series_by_id``."""
+        return _get_series_lookup(c, term)
 
     @tool()
     def sonarr_get_diskspace() -> str:
