@@ -129,7 +129,7 @@ async def test_process_routes_inlined_mcp_through_execute_mcp_tool(inline_agent)
     inline_agent.llm.chat = AsyncMock(side_effect=[tool_response, final])
 
     with patch("mose.agent.execute_mcp_tool", new_callable=AsyncMock) as exec_mcp:
-        exec_mcp.return_value = "pong"
+        exec_mcp.return_value = ("pong", False)
         result = await inline_agent.process("hi", "sess-inline")
 
     assert result == "Done."
@@ -139,11 +139,12 @@ async def test_process_routes_inlined_mcp_through_execute_mcp_tool(inline_agent)
 @pytest.mark.asyncio
 async def test_execute_mcp_tool_denies_write_without_callback():
     mcp = MagicMock()
-    mcp.call_tool = AsyncMock(return_value="should not run")
+    mcp.call_tool = AsyncMock(return_value=("should not run", False))
     init_tool_registry(mcp)
     init_approval(None)
     try:
-        out = await execute_mcp_tool("plex-ops-admin__library_scan", {})
+        out, mcp_err = await execute_mcp_tool("plex-ops-admin__library_scan", {})
+        assert not mcp_err
         assert "denied" in out.lower()
         mcp.call_tool.assert_not_called()
     finally:

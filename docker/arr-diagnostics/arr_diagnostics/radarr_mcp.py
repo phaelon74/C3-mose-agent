@@ -37,6 +37,23 @@ def radarr_manual_import_missing_scope_error(
     return None
 
 
+def radarr_queue_import_execute(
+    c: ArrClient,
+    downloadId: str,
+    movieId: int,
+    *,
+    importMode: str | None = None,
+    pathHints: list[str] | None = None,
+) -> str:
+    """Build payload and run ``manual_import_commit`` from ``radarr_manual_import`` (MCP tool + tests)."""
+    body: dict[str, Any] = {"downloadId": downloadId, "movieId": int(movieId)}
+    if importMode is not None and str(importMode).strip():
+        body["importMode"] = str(importMode).strip()
+    if pathHints:
+        body["pathHints"] = [str(x) for x in pathHints if str(x).strip()]
+    return radarr_manual_import_commit(c, body)
+
+
 def build_radarr_app(c: ArrClient) -> FastMCP:
     mcp = FastMCP("radarr-diagnostics")
     # See sonarr_mcp.build_sonarr_app: wrap every tool so API errors return JSON
@@ -135,15 +152,20 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
         return json_response(c.post_json(f"/queue/grab/{id}", {}))
 
     @tool()
-    def radarr_post_queue_import(payload: str) -> str:
-        """Commit import for a queued/blocked movie via **GET /manualimport → POST /manualimport → POST /command ManualImport** (Radarr v3). ``payload`` JSON: ``downloadId``, ``movieId`` (from queue). Optional: ``importMode`` (``auto``|``move``|``copy``), ``pathHints`` (list). Halts with ``manualimport_rejected`` if reprocess returns rejections. Requires approval."""
-        try:
-            body = json.loads(payload)
-        except json.JSONDecodeError as e:
-            return json.dumps({"error": "invalid_json", "detail": str(e)})
-        if not isinstance(body, dict):
-            return json.dumps({"error": "payload_must_be_a_json_object"})
-        return radarr_manual_import_commit(c, body)
+    def radarr_post_queue_import(
+        downloadId: str,
+        movieId: int,
+        importMode: str | None = None,
+        pathHints: list[str] | None = None,
+    ) -> str:
+        """Commit import for a queued/blocked movie via **GET /manualimport → POST /manualimport → POST /command ManualImport** (Radarr v3). Pass ``downloadId`` and ``movieId`` from the queue (not a JSON ``payload`` string). Optional: ``importMode`` (``auto``|``move``|``copy``), ``pathHints`` (strings). Halts with ``manualimport_rejected`` if reprocess returns rejections. Requires approval."""
+        return radarr_queue_import_execute(
+            c,
+            downloadId,
+            movieId,
+            importMode=importMode,
+            pathHints=pathHints,
+        )
 
     @tool()
     def radarr_post_manual_import(payload: str) -> str:

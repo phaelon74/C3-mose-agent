@@ -790,10 +790,14 @@ async def _tool_list_available_tools(args: dict, **kwargs) -> str:
     return f"Available tools ({len(lines)}):\n" + "\n".join(lines)
 
 
-async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> str:
-    """Run an MCP tool by ``server__tool`` name with read/write policy (shared with ``use_tool``)."""
+async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    """Run an MCP tool by ``server__tool`` name with read/write policy (shared with ``use_tool``).
+
+    Returns ``(text, is_mcp_error)`` where ``is_mcp_error`` is True when the MCP SDK marks the
+    tool result as an error (e.g. FastMCP input validation), not for normal JSON error bodies.
+    """
     if _mcp_manager is None:
-        return "Error: MCP not configured — no external tools available."
+        return "Error: MCP not configured — no external tools available.", False
 
     if not isinstance(arguments, dict):
         arguments = {}
@@ -802,13 +806,14 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> str:
     if "__" not in full_name:
         return (
             "Error: MCP tool name must use server__tool format "
-            "(e.g. plex-ops-admin__library_list)."
+            "(e.g. plex-ops-admin__library_list).",
+            False,
         )
     server, bare_tool = full_name.split("__", 1)
     server = server.strip()
     bare_tool = bare_tool.strip()
     if not server or not bare_tool:
-        return "Error: invalid MCP tool name (empty server or tool segment)."
+        return "Error: invalid MCP tool name (empty server or tool segment).", False
     policy = classify_mcp_tool(server, bare_tool)
     if policy != "read":
         if _approval_callback is None:
@@ -821,7 +826,8 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> str:
             return (
                 "Execution denied: no approval callback configured. "
                 "Mutating MCP tools require human approval — configure Signal "
-                "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled."
+                "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled.",
+                False,
             )
         arg_str = json.dumps(arguments, default=str)
         if len(arg_str) > 500:
@@ -841,7 +847,7 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> str:
                 reason="operator_denied",
                 tool=full_name,
             )
-            return "Execution denied by operator."
+            return "Execution denied by operator.", False
         log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
 
     return await _mcp_manager.call_tool(full_name, arguments)
@@ -860,7 +866,8 @@ async def _tool_use_tool(args: dict, **kwargs) -> str:
         arguments = json.loads(arguments) if arguments else {}
 
     full_name = str(name).strip()
-    return await execute_mcp_tool(full_name, arguments)
+    text, _err = await execute_mcp_tool(full_name, arguments)
+    return text
 
 
 # --- Summarize paper (extract-then-summarize) ---
@@ -916,7 +923,7 @@ async def _tool_summarize_paper(args: dict, context: str = "", llm=None, root=No
     paper_meta = None
     if _mcp_manager is not None:
         try:
-            index_result = await _mcp_manager.call_tool(
+            index_result, _paper_err = await _mcp_manager.call_tool(
                 "paper_db__index_paper", {"arxiv_id": arxiv_id}
             )
             log_event(logger, "summarize_paper_indexed", arxiv_id=arxiv_id)

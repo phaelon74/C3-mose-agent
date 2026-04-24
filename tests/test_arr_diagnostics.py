@@ -461,6 +461,75 @@ def test_radarr_manual_import_commit_halts_on_rejections() -> None:
     assert posts == ["/manualimport"]
 
 
+def test_radarr_queue_import_execute_builds_commit_payload(monkeypatch) -> None:
+    import json as _json
+
+    from arr_diagnostics import radarr_mcp
+
+    captured: list[dict[str, object]] = []
+
+    def fake_commit(_c: object, body: dict[str, object]) -> str:
+        captured.append(body)
+        return _json.dumps({"ok": True})
+
+    monkeypatch.setattr(radarr_mcp, "radarr_manual_import_commit", fake_commit)
+
+    class _Dummy:
+        pass
+
+    radarr_mcp.radarr_queue_import_execute(
+        _Dummy(),  # type: ignore[arg-type]
+        "dl-9",
+        18037,
+        importMode="copy",
+        pathHints=["Gremlins"],
+    )
+    assert captured[0] == {
+        "downloadId": "dl-9",
+        "movieId": 18037,
+        "importMode": "copy",
+        "pathHints": ["Gremlins"],
+    }
+    captured.clear()
+    radarr_mcp.radarr_queue_import_execute(_Dummy(), "x", 1)  # type: ignore[arg-type]
+    assert captured[0] == {"downloadId": "x", "movieId": 1}
+
+
+def test_sonarr_queue_import_execute_builds_commit_payload(monkeypatch) -> None:
+    import json as _json
+
+    from arr_diagnostics import sonarr_mcp
+
+    captured: list[dict[str, object]] = []
+
+    def fake_commit(_c: object, body: dict[str, object]) -> str:
+        captured.append(body)
+        return _json.dumps({"ok": True})
+
+    monkeypatch.setattr(sonarr_mcp, "manual_import_commit", fake_commit)
+
+    class _Dummy:
+        pass
+
+    sonarr_mcp.sonarr_queue_import_execute(
+        _Dummy(),  # type: ignore[arg-type]
+        "d",
+        10,
+        [1, 2],
+        seasonNumber=4,
+        episodeNumber=26,
+        pathHints=["hint"],
+    )
+    assert captured[0] == {
+        "downloadId": "d",
+        "seriesId": 10,
+        "episodeIds": [1, 2],
+        "seasonNumber": 4,
+        "episodeNumber": 26,
+        "pathHints": ["hint"],
+    }
+
+
 def test_build_apps_do_not_raise() -> None:
     from arr_diagnostics.client import ArrClient
     from arr_diagnostics.radarr_mcp import build_radarr_app

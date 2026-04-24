@@ -20,6 +20,34 @@ SONARR_COMMANDS = frozenset({
 })
 
 
+def sonarr_queue_import_execute(
+    c: ArrClient,
+    downloadId: str,
+    seriesId: int,
+    episodeIds: list[int],
+    *,
+    seasonNumber: int | None = None,
+    episodeNumber: int | None = None,
+    importMode: str | None = None,
+    pathHints: list[str] | None = None,
+) -> str:
+    """Build payload and run :func:`sonarr_manual_import.manual_import_commit` (MCP tool + tests)."""
+    body: dict[str, Any] = {
+        "downloadId": downloadId,
+        "seriesId": int(seriesId),
+        "episodeIds": [int(x) for x in episodeIds],
+    }
+    if seasonNumber is not None:
+        body["seasonNumber"] = int(seasonNumber)
+    if episodeNumber is not None:
+        body["episodeNumber"] = int(episodeNumber)
+    if importMode is not None and str(importMode).strip():
+        body["importMode"] = str(importMode).strip()
+    if pathHints:
+        body["pathHints"] = [str(x) for x in pathHints if str(x).strip()]
+    return manual_import_commit(c, body)
+
+
 def _post_episode_search_command(client: ArrClient, episode_ids: list[int]) -> str:
     """POST ``EpisodeSearch`` with explicit ids (Sonarr treats missing ``episodeIds`` as search-all-missing)."""
     if not episode_ids:
@@ -147,15 +175,26 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         return json_response(c.post_json(f"/queue/grab/{id}", {}))
 
     @tool()
-    def sonarr_post_queue_import(payload: str) -> str:
-        """Commit import for a queued/blocked release via Sonarr v3 **GET /manualimport → POST /manualimport (validate) → POST /command {name: ManualImport} (commit)**. The standalone ``POST /manualimport`` is validation only; the actual import fires via the Command API. ``payload`` JSON: ``downloadId``, ``seriesId``, ``episodeIds`` (list). Optional: ``seasonNumber``, ``episodeNumber``, ``pathHints``, ``importMode`` (``auto``|``move``|``copy``). Halts with ``manualimport_rejected`` if Sonarr's validation returns rejections. Requires approval."""
-        try:
-            body = json.loads(payload)
-        except json.JSONDecodeError as e:
-            return json.dumps({"error": "invalid_json", "detail": str(e)})
-        if not isinstance(body, dict):
-            return json.dumps({"error": "payload_must_be_a_json_object"})
-        return manual_import_commit(c, body)
+    def sonarr_post_queue_import(
+        downloadId: str,
+        seriesId: int,
+        episodeIds: list[int],
+        seasonNumber: int | None = None,
+        episodeNumber: int | None = None,
+        importMode: str | None = None,
+        pathHints: list[str] | None = None,
+    ) -> str:
+        """Commit import for a queued/blocked release via Sonarr v3 **GET /manualimport → POST /manualimport (validate) → POST /command ManualImport**. Pass ``downloadId``, ``seriesId``, and ``episodeIds`` from the queue (not a JSON ``payload`` string). Optional: ``seasonNumber``, ``episodeNumber``, ``pathHints``, ``importMode`` (``auto``|``move``|``copy``). Halts with ``manualimport_rejected`` if Sonarr's validation returns rejections. Requires approval."""
+        return sonarr_queue_import_execute(
+            c,
+            downloadId,
+            seriesId,
+            episodeIds,
+            seasonNumber=seasonNumber,
+            episodeNumber=episodeNumber,
+            importMode=importMode,
+            pathHints=pathHints,
+        )
 
     def _command_tool(name: str):
         def _run() -> str:

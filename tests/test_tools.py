@@ -358,7 +358,7 @@ def _make_mock_mcp(tools=None):
     server = MagicMock()
     server.tools = tools
     mcp.servers = {"test_server": server}
-    mcp.call_tool = AsyncMock(return_value="tool result")
+    mcp.call_tool = AsyncMock(return_value=("tool result", False))
     return mcp
 
 
@@ -425,7 +425,7 @@ class TestUseTool:
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_error(self):
         mcp = _make_mock_mcp()
-        mcp.call_tool = AsyncMock(return_value="Error: Unknown tool 'srv__nope'")
+        mcp.call_tool = AsyncMock(return_value=("Error: Unknown tool 'srv__nope'", False))
         init_tool_registry(mcp)
         result = await call_native_tool("use_tool", {"name": "srv__nope", "arguments": {}})
         assert "Error" in result

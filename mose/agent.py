@@ -298,6 +298,8 @@ class Agent:
         self._review_task: asyncio.Task[Any] | None = None
         # Log tool_list_over_cap at most once per session_id.
         self._tool_list_cap_logged_sessions: set[str] = set()
+        # Per-session guard: same MCP tool+args + SDK isError twice → skip further calls (no approval spam).
+        self._mcp_repeat_guard: dict[str, dict[str, Any]] = {}
 
     def _build_llm_tools(self, session_id: str) -> list[dict[str, Any]]:
         """Native tools plus inlined MCP tools (local list; never mutates ``NATIVE_TOOLS``)."""
@@ -422,7 +424,29 @@ class Agent:
                         )
                     else:
                         parsed = _coerce_tool_arguments(tc.arguments)
-                        result = await execute_mcp_tool(tc.name, parsed)
+                        sig = f"{tc.name}:{json.dumps(parsed, sort_keys=True, default=str)}"
+                        guard = self._mcp_repeat_guard.setdefault(
+                            session_id, {"sig": "", "fail_streak": 0}
+                        )
+                        if guard.get("sig") == sig and guard.get("fail_streak", 0) >= 2:
+                            result = (
+                                "Error: [MCP] The same tool with the same arguments failed twice in a row with "
+                                "an MCP-level error (often invalid parameters vs the tool schema). "
+                                f"Do not call `{tc.name}` again with these arguments; check logs or fix "
+                                "the parameter types (e.g. use scalar fields, not a nested `payload` object)."
+                            )
+                            mcp_is_err = True
+                        else:
+                            result, mcp_is_err = await execute_mcp_tool(tc.name, parsed)
+                            if mcp_is_err:
+                                if guard.get("sig") == sig:
+                                    guard["fail_streak"] = guard.get("fail_streak", 0) + 1
+                                else:
+                                    guard["sig"] = sig
+                                    guard["fail_streak"] = 1
+                            else:
+                                guard["sig"] = ""
+                                guard["fail_streak"] = 0
                 except Exception as e:
                     result = f"Tool error: {e}"
                     logger.exception(f"Tool call failed: {tc.name}")

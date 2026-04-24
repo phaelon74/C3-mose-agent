@@ -42,8 +42,8 @@ class MCPServer:
             })
         log_event(logger, "tools_refreshed", server=self.name, tool_count=len(self.tools))
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Call a tool on this server and return the text result."""
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        """Call a tool on this server. Returns ``(text, is_mcp_error)`` where ``is_mcp_error`` mirrors SDK ``isError``."""
         with log_duration(logger, "tool_call", server=self.name, tool=tool_name):
             result = await self.session.call_tool(tool_name, arguments)
 
@@ -58,7 +58,7 @@ class MCPServer:
         text = "\n".join(parts)
         if result.isError:
             log_event(logger, "tool_error", server=self.name, tool=tool_name, error=text[:200])
-        return text
+        return text, bool(result.isError)
 
 
 class MCPManager:
@@ -188,17 +188,20 @@ class MCPManager:
                     return server, tool["_tool_name"]
         return None
 
-    async def call_tool(self, full_name: str, arguments: str | dict) -> str:
+    async def call_tool(self, full_name: str, arguments: str | dict) -> tuple[str, bool]:
         """Route a tool call to the correct MCP server.
 
         If the target server's stdio session has been torn down (e.g. a prior
         unhandled exception inside a FastMCP tool), automatically reconnect and
         retry the call once. Without this, a single sidecar crash would poison
         all subsequent calls in the parent process with ``ClosedResourceError``.
+
+        Returns ``(text, is_mcp_error)``; ``is_mcp_error`` is True only when the
+        MCP SDK marks the tool result as an error (e.g. schema validation).
         """
         resolved = self._resolve_tool(full_name)
         if resolved is None:
-            return f"Error: Unknown tool '{full_name}'"
+            return f"Error: Unknown tool '{full_name}'", False
 
         server, tool_name = resolved
         if isinstance(arguments, str):
@@ -221,7 +224,7 @@ class MCPManager:
                     "server": server.name,
                     "tool": tool_name,
                     "detail": f"MCP session closed ({type(e).__name__}) and reconnect failed",
-                })
+                }), False
             # Re-resolve against the newly rebuilt server.
             resolved2 = self._resolve_tool(full_name)
             if resolved2 is None:
@@ -229,7 +232,7 @@ class MCPManager:
                     "error": "mcp_tool_missing_after_reconnect",
                     "server": server.name,
                     "tool": tool_name,
-                })
+                }), False
             server2, tool_name2 = resolved2
             try:
                 return await server2.call_tool(tool_name2, arguments)
@@ -239,7 +242,7 @@ class MCPManager:
                     "server": server2.name,
                     "tool": tool_name2,
                     "detail": repr(e2)[:500],
-                })
+                }), False
 
     async def close(self) -> None:
         """Shut down all MCP server connections."""
