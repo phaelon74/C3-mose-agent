@@ -753,7 +753,7 @@ remain text-only):
 
 | Provider | Requirements |
 |----------|----------------|
-| `vllm` | Vision-language model (e.g. Qwen3-VL); start server with e.g. `--limit-mm-per-prompt '{"image":4}'` |
+| `vllm` | Vision-language checkpoint **and** no `--language-model-only`. Start with `--limit-mm-per-prompt '{"image":4}'`. That flag is what produces `At most 0 image(s) may be provided`. |
 | `tabby` | Load model with `vision: true` in Tabby config; confirm `/v1/models` shows `use_vision: true` |
 | `openai_compat` | Backend must accept OpenAI-style multimodal chat completions |
 

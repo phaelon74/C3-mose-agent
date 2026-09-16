@@ -87,8 +87,11 @@ def vision_not_supported_message(provider: str, config: LLMConfig) -> str:
         )
     if p == "vllm":
         return (
-            "vLLM: use a vision-language model (e.g. Qwen3-VL) and set "
-            "--limit-mm-per-prompt '{\"image\":4}' (or similar) on the server."
+            "vLLM rejected the image(s). The running engine has a multimodal image "
+            "limit of 0 — usually because the server was started with "
+            "--language-model-only (language tower only, no vision encoder). "
+            "Remove that flag, reload a vision-capable checkpoint, and set "
+            "--limit-mm-per-prompt '{\"image\":4}' (or similar)."
         )
     return (
         "The configured LLM server must accept OpenAI-style multimodal chat "

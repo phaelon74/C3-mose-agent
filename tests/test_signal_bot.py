@@ -357,3 +357,41 @@ async def test_send_message_includes_attachments(tmp_path):
     assert params["groupId"] == "adm-gid"
     assert params["message"] == "Weekly list"
     assert params["attachments"] == [str(md.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_on_ready_runs_after_reader_starts():
+    """Startup recovery sends RPC; the reader must already be draining replies."""
+    agent = AsyncMock()
+    config = _signal_config()
+    bot = MoseSignalBot(agent, config)
+    order: list[str] = []
+
+    async def fake_connect():
+        order.append("connect")
+
+    async def fake_reader():
+        order.append("reader")
+        await asyncio.Event().wait()
+
+    async def on_ready():
+        order.append("on_ready")
+        assert "reader" in order
+
+    bot._connect = fake_connect  # type: ignore[method-assign]
+    bot._reader_loop = fake_reader  # type: ignore[method-assign]
+    bot.on_ready = on_ready
+    task = asyncio.create_task(bot.start())
+    try:
+        for _ in range(50):
+            if "on_ready" in order:
+                break
+            await asyncio.sleep(0.01)
+        assert order[:3] == ["connect", "reader", "on_ready"]
+    finally:
+        bot._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

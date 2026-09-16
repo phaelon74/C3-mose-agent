@@ -1073,13 +1073,17 @@ class MoseSignalBot:
             try:
                 await self._connect()
                 backoff = 1.0
+                # Reader must run before on_ready: startup recovery sends JSON-RPC
+                # ``send`` and waits for a reply. Without the reader, that wait
+                # always times out (30s).
+                self._reader_task = asyncio.create_task(self._reader_loop())
                 if not ready_fired and getattr(self, "on_ready", None) is not None:
                     ready_fired = True
                     try:
+                        await asyncio.sleep(0)
                         await self.on_ready()
                     except Exception:
                         logger.exception("signal_on_ready_callback_failed")
-                self._reader_task = asyncio.create_task(self._reader_loop())
                 await self._reader_task
             except asyncio.CancelledError:
                 break

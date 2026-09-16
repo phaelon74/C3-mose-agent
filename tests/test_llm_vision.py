@@ -13,6 +13,7 @@ from mose.llm_vision import (
     message_has_vision,
     prepare_messages_for_provider,
     provider_supports_vision,
+    vision_error_hint,
 )
 
 
@@ -70,3 +71,13 @@ def test_provider_supports_vision_disabled():
 
 def test_message_has_vision():
     assert message_has_vision([{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}])
+
+
+def test_vllm_zero_image_limit_hint():
+    hint = vision_error_hint(
+        "vllm",
+        RuntimeError("At most 0 image(s) may be provided in one prompt. (parameter=image)"),
+    )
+    assert hint is not None
+    assert "--language-model-only" in hint
+    assert "limit-mm-per-prompt" in hint
