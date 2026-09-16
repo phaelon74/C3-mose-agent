@@ -206,6 +206,46 @@ async def _signal_skill_review_notify(report_path: str, summary: str) -> None:
     )
 
 
+async def _signal_upcoming_notify(summary: str, report_path: str, attachment_path: str | None = None) -> None:
+    """Weekly upcoming-media report: summary plus Markdown attachment (fallback: path)."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    body = f"Upcoming media report\n\n{summary}"
+    att = [attachment_path] if attachment_path else None
+    try:
+        await bot._send_message(admin_gid, body, attachments=att)
+    except Exception:
+        logger.exception("signal_upcoming_attach_failed", extra={"path": report_path})
+        await bot._send_message(
+            admin_gid,
+            f"{body}\n\nFull report on disk: {report_path}",
+        )
+
+
+async def _signal_upcoming_failure(kind: str, message: str, _unused: str | None = None) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    await bot._send_message(admin_gid, f"Upcoming {kind} failure\n\n{message}")
+
+
+async def _signal_upcoming_delivery(slug: str, body: str) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    await bot._send_message(admin_gid, body)
+
+
 async def _signal_tracker_propose_callback(slug: str, description: str, expires_at: float) -> None:
     """Fire-and-forget Signal notification for tracker proposal / deletion proposal."""
     bot = _active_bot
@@ -269,6 +309,69 @@ async def _signal_task_propose_callback(
         await bot._send_message(admin_gid, prompt)
     except Exception:
         logger.exception("signal_task_propose_send_failed", extra={"slug": slug})
+
+
+async def _signal_playbook_propose_callback(
+    slug: str, description: str, expires_at: float, payload: dict[str, Any]
+) -> None:
+    """Fire-and-forget Signal notification for playbook proposal or run."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    from mose.playbook_decision import (
+        PLAYBOOK_RUN_PROPOSAL_KIND,
+        format_playbook_notification_body,
+    )
+
+    body = format_playbook_notification_body(payload)
+    kind = str(payload.get("proposal_kind") or "")
+    if kind == PLAYBOOK_RUN_PROPOSAL_KIND:
+        header = "Playbook run approval needed"
+    elif payload.get("updates") and payload.get("target_slug"):
+        header = "Playbook update approval needed"
+    else:
+        header = "Playbook approval needed"
+    prompt = f"{header}\n\n{body}\n\nExpires: {_format_ts(expires_at)} (UTC)"
+    try:
+        await bot._send_message(admin_gid, prompt)
+    except Exception:
+        logger.exception("signal_playbook_propose_send_failed", extra={"slug": slug})
+
+
+async def _signal_playbook_run_delivery(
+    run_slug: str, body: str, payload: dict[str, Any]
+) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    eng_gid = (bot.config.engagement_group_id or "").strip()
+    if not eng_gid:
+        return
+    playbook_slug = str(payload.get("playbook_slug") or "playbook")
+    try:
+        await bot._send_message(eng_gid, f"[playbook:{playbook_slug} run:{run_slug}]\n\n{body}")
+    except Exception:
+        logger.exception("signal_playbook_run_delivery_failed", extra={"run_slug": run_slug})
+
+
+async def _signal_playbook_run_reject(slug: str, payload: dict[str, Any]) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    eng_gid = (bot.config.engagement_group_id or "").strip()
+    if not eng_gid:
+        return
+    playbook_slug = str(payload.get("playbook_slug") or "playbook")
+    try:
+        await bot._send_message(
+            eng_gid,
+            f"[playbook:{playbook_slug}] Run '{slug}' was rejected by admin.",
+        )
+    except Exception:
+        logger.exception("signal_playbook_run_reject_failed", extra={"slug": slug})
 
 
 def _signal_group_for_recipient(bot: "MoseSignalBot", recipient: str) -> str | None:
@@ -345,6 +448,10 @@ def _parse_approval_reply(
         candidate = tokens[1].lower().strip(":,;.")
         if candidate.startswith("slug="):
             candidate = candidate[len("slug="):]
+        if candidate.startswith("upcoming-"):
+            from mose.upcoming import canonical_upcoming_slug
+
+            candidate = canonical_upcoming_slug(candidate)
         return (candidate or None), action
     return None, action
 
@@ -446,6 +553,46 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
             await bot._send_message(
                 admin_gid,
                 f"No change for '{slug}' (duplicate task, wrong state, or unknown).",
+            )
+        return True
+
+    if row.kind in (
+        "playbook_proposal",
+        "playbook_deletion",
+        "playbook_update",
+        "playbook_run_proposal",
+    ):
+        from mose.playbook_decision import PLAYBOOK_RUN_PROPOSAL_KIND, handle_playbook_decision
+
+        applied = await handle_playbook_decision(slug, approved=approved)
+        if applied:
+            verb = "approved" if approved else "rejected"
+            if row.kind == PLAYBOOK_RUN_PROPOSAL_KIND and approved:
+                await bot._send_message(
+                    admin_gid,
+                    f"Playbook run '{slug}' approved — executing now.",
+                )
+            else:
+                await bot._send_message(admin_gid, f"Playbook request '{slug}' {verb}.")
+        else:
+            await bot._send_message(
+                admin_gid,
+                f"No change for '{slug}' (duplicate playbook, wrong state, or unknown).",
+            )
+        return True
+
+    if row.kind == "upcoming_add":
+        from mose.upcoming_decision import handle_upcoming_decision
+
+        tokens = text.strip().split()
+        line_spec = ",".join(tokens[2:]) if approved and len(tokens) >= 3 else None
+        if approved:
+            await bot._send_message(admin_gid, f"Upcoming list '{slug}' approved — adding now.")
+        applied = await handle_upcoming_decision(slug, approved=approved, line_spec=line_spec)
+        if not applied:
+            await bot._send_message(
+                admin_gid,
+                f"No change for '{slug}' (already decided or unknown).",
             )
         return True
 
@@ -683,8 +830,9 @@ class MoseSignalBot:
             self._writer.write(line.encode())
             await self._writer.drain()
 
+        timeout = 90.0 if params and params.get("attachments") else 30.0
         try:
-            return await asyncio.wait_for(future, 30)
+            return await asyncio.wait_for(future, timeout)
         finally:
             self._rpc_pending.pop(req_id, None)
 
@@ -703,14 +851,34 @@ class MoseSignalBot:
             params["account"] = account
         return await self._send_rpc("getAttachment", params)
 
-    async def _send_message(self, group_id: str, text: str) -> None:
-        """Send a message to a Signal group via JSON-RPC (groupId only)."""
+    async def _send_message(
+        self,
+        group_id: str,
+        text: str,
+        *,
+        attachments: list[str] | None = None,
+    ) -> None:
+        """Send a message to a Signal group via JSON-RPC (groupId only).
+
+        Optional ``attachments`` are absolute file paths (signal-cli ``send``
+        ``attachments`` array). Attached only on the first chunk.
+        """
         gid = (group_id or "").strip()
         if not gid:
             return
+        from pathlib import Path
+
+        abs_att: list[str] = []
+        for raw in attachments or []:
+            p = Path(str(raw)).expanduser()
+            if p.is_file():
+                abs_att.append(str(p.resolve()))
         chunks = _split_message(text)
-        for chunk in chunks:
-            await self._send_rpc("send", {"groupId": gid, "message": chunk})
+        for i, chunk in enumerate(chunks):
+            params: dict[str, Any] = {"groupId": gid, "message": chunk}
+            if abs_att and i == 0:
+                params["attachments"] = abs_att
+            await self._send_rpc("send", params)
 
     def _handle_rpc_line(self, line: str) -> None:
         """Process one JSON-RPC line (response or notification)."""

@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from arr_diagnostics.client import ArrClient, json_response, safe_tool_decorator, truncate_output
+from arr_diagnostics.client import ArrClient, json_response, paginate_index, compact_series_row, safe_tool_decorator, truncate_output
 from arr_diagnostics.sonarr_manual_import import manual_import_commit
 
 SONARR_COMMANDS = frozenset({
@@ -315,6 +315,28 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         if includeSeasonImages is not None:
             params["includeSeasonImages"] = includeSeasonImages
         return json_response(c.get_json("/series", params or None))
+
+    @tool()
+    def sonarr_library_index(page: int = 1, pageSize: int = 400) -> str:
+        """Compact GET /series index (tvdbId, id, title, year, rootFolderPath, seriesType, path).
+
+        Paginated. Prefer this over a full ``sonarr_get_series`` dump. Daily upcoming
+        sync uses agent-side HTTP, not this tool.
+        """
+        raw = c.get_json("/series")
+        rows = raw if isinstance(raw, list) else []
+        compact = [compact_series_row(r) for r in rows if isinstance(r, dict)]
+        return json_response(paginate_index(compact, page=page, page_size=pageSize), max_chars=240000)
+
+    @tool()
+    def sonarr_get_rootfolder() -> str:
+        """GET /rootfolder — library root folders (path, id, freeSpace)."""
+        return json_response(c.get_json("/rootfolder"), max_chars=80000)
+
+    @tool()
+    def sonarr_get_qualityprofile() -> str:
+        """GET /qualityprofile — quality profiles (id, name)."""
+        return json_response(c.get_json("/qualityprofile"), max_chars=80000)
 
     @tool()
     def sonarr_get_series_by_id(id: int) -> str:

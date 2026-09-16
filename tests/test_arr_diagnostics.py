@@ -734,3 +734,17 @@ def test_safe_tool_preserves_signature_for_fastmcp_introspection() -> None:
     sig = inspect.signature(my_tool)
     assert list(sig.parameters.keys()) == ["series_id", "season"]
     assert sig.parameters["series_id"].annotation is int
+
+
+def test_paginate_index_compact_rows() -> None:
+    from arr_diagnostics.client import compact_movie_row, compact_series_row, paginate_index
+
+    movies = [{"tmdbId": i, "id": i, "title": f"M{i}", "year": 2026, "hasFile": False, "path": f"/p/{i}"} for i in range(900)]
+    compact = [compact_movie_row(m) for m in movies]
+    page = paginate_index(compact, page=1, page_size=400)
+    assert page["total"] == 900
+    assert len(page["items"]) == 400
+    assert "tmdbId" in page["items"][0]
+    series = compact_series_row({"tvdbId": 1, "id": 2, "title": "S", "year": 2026, "rootFolderPath": "/Anime", "seriesType": "anime", "path": "/a"})
+    assert series["tvdbId"] == 1
+    assert series["rootFolderPath"] == "/Anime"

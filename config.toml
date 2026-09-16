@@ -88,6 +88,31 @@ failure_threshold = 5
 default_recipient = "signal:admin"
 run_retention_days = 90
 
+[upcoming]
+enabled = true
+daily_hour = 5
+weekly_weekday = "monday"
+weekly_hour = 9
+# timezone empty → inherit [scheduler].timezone
+sync_max_age_hours = 26
+recommendation_horizon_days = 180
+min_popularity = 5.0
+min_vote_count = 20
+cap_movies = 40
+cap_tv = 40
+cap_anime = 20
+failure_threshold = 3
+# Auto-discover Sonarr TV vs Anime folders by path substring:
+sonarr_tv_root_match = "/TV"
+sonarr_anime_root_match = "/Anime"
+# Optional explicit paths / profile ids (0 = first profile from *arr):
+# sonarr_tv_root_path = ""
+# sonarr_anime_root_path = ""
+# radarr_root_path = ""
+# radarr_quality_profile_id = 0
+# sonarr_tv_quality_profile_id = 0
+# sonarr_anime_quality_profile_id = 0
+
 [portal]
 # When enabled, mose-agent listens on approval_bridge_port for POST /approve (Code Mode mutating MCP).
 enabled = false

@@ -55,6 +55,22 @@ from mose.task_scheduler import (
     init_task_delivery_callback,
     init_task_failure_callback,
 )
+from mose.playbook_decision import (
+    format_playbook_notification_body,
+    handle_playbook_decision,
+    init_playbook_decision_runtime,
+    init_playbook_propose_callback,
+    init_playbook_run_delivery_callback,
+    init_playbook_run_reject_callback,
+)
+from mose.upcoming import (
+    init_upcoming_failure_notify,
+    init_upcoming_notify,
+    run_daily_sync,
+    run_weekly_recommend,
+)
+from mose.upcoming_decision import handle_upcoming_decision, init_upcoming_delivery_callback
+from mose.upcoming_store import UpcomingStore
 
 
 async def _maybe_start_portal_approval_bridge(config) -> Any:
@@ -111,6 +127,31 @@ async def _cli_task_failure(task: Any, message: str) -> None:
     print(f"\n[scheduled task FAILURE:{slug}]\n{message}\n")
 
 
+async def _cli_playbook_propose_callback(
+    slug: str, description: str, expires_at: float, payload: dict[str, Any]
+) -> None:
+    from datetime import datetime, timezone
+
+    exp = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(timespec="minutes")
+    body = format_playbook_notification_body(payload)
+    print(
+        f"\n[playbook proposal] {slug}\n"
+        f"{body}\n"
+        f"  Expires: {exp} UTC\n"
+        f"  Decide: python -m mose --decide {slug} y|n\n"
+    )
+
+
+async def _cli_playbook_run_delivery(run_slug: str, body: str, payload: dict[str, Any]) -> None:
+    playbook_slug = str(payload.get("playbook_slug") or "playbook")
+    print(f"\n[playbook run:{playbook_slug} -> {run_slug}]\n{body}\n")
+
+
+async def _cli_playbook_run_reject(slug: str, payload: dict[str, Any]) -> None:
+    playbook_slug = str(payload.get("playbook_slug") or "playbook")
+    print(f"\n[playbook run rejected] {playbook_slug} / {slug}\n")
+
+
 async def _cli_skill_propose_callback(
     path: str, slug: str, title: str, description: str, rationale: str, expires_at: float
 ) -> None:
@@ -150,6 +191,23 @@ def _cli_skill_review_notify(report_path: str, summary: str) -> None:
     print(f"  Report: {report_path}")
     for line in summary.splitlines():
         print(f"  {line}")
+
+
+def _cli_upcoming_notify(summary: str, report_path: str, attachment_path: str | None = None) -> None:
+    print("\n[upcoming media]")
+    print(f"  Report: {report_path}")
+    if attachment_path:
+        print(f"  Attachment: {attachment_path}")
+    for line in summary.splitlines():
+        print(f"  {line}")
+
+
+def _cli_upcoming_failure(kind: str, message: str, _unused: str | None = None) -> None:
+    print(f"\n[upcoming {kind} FAILURE]\n{message}\n")
+
+
+async def _cli_upcoming_delivery(slug: str, body: str) -> None:
+    print(f"\n[upcoming add:{slug}]\n{body}\n")
 
 
 async def _cli_skill_recovery_notice(
@@ -552,11 +610,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--decide",
-        nargs=2,
-        metavar=("SLUG", "DECISION"),
-        help="Resolve a pending skill proposal from the command line. "
+        nargs="+",
+        metavar="ARG",
+        help="Resolve a pending approval: SLUG DECISION [LINES]. "
              "DECISION is 'approve' / 'yes' / 'y', 'reject' / 'no' / 'n', "
-             "or 'cancel' / 'stop' (abort an approved-but-unbuilt build).",
+             "or 'cancel' / 'stop'. Optional LINES (e.g. 1,4,7) for upcoming-media subset.",
     )
     parser.add_argument(
         "--sweep-approvals",
@@ -612,10 +670,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="SLUG",
         help="Run one scheduled task immediately (full agent loop; does not need live Signal bot).",
     )
+    parser.add_argument(
+        "--upcoming-sync",
+        action="store_true",
+        help="Run one upcoming-media daily sync (TMDB + Radarr/Sonarr snapshot) and exit.",
+    )
+    parser.add_argument(
+        "--upcoming-recommend",
+        action="store_true",
+        help="Run the weekly upcoming-media recommend job (syncs first if stale) and exit.",
+    )
+    parser.add_argument(
+        "--upcoming-attach-test",
+        metavar="PATH",
+        help="Send a test Markdown attachment to the Signal admin group and exit.",
+    )
     return parser.parse_args(argv)
 
 
-async def _run_decide_once(config, slug: str, decision: str) -> int:
+async def _run_decide_once(config, slug: str, decision: str, line_spec: str | None = None) -> int:
     """Apply a skill-proposal decision from the CLI (used by operator scripts).
 
     ``decision`` may be approve/yes/y, reject/no/n/deny, or cancel/stop/
@@ -672,6 +745,46 @@ async def _run_decide_once(config, slug: str, decision: str) -> int:
         applied = await handle_tracker_decision(slug, approved=(action == "approve"))
         memory.close()
         print(f"{slug}: {'applied' if applied else 'noop (already decided, duplicate, or unknown)'}")
+        return 0 if applied else 1
+
+    if row is not None and row.kind in (
+        "playbook_proposal",
+        "playbook_deletion",
+        "playbook_update",
+        "playbook_run_proposal",
+    ):
+        init_workspace(config.agent.workspace, config.agent.allow_read_outside)
+        init_terminal(config.terminal, config.agent.workspace)
+        mcp = MCPManager()
+        mcp_config_path = config.root_dir / "mcp_servers.json"
+        await mcp.load_servers(mcp_config_path)
+        init_tool_registry(mcp, config)
+        agent = Agent(config, llm, memory, mcp)
+        init_playbook_decision_runtime(memory=memory, get_agent=lambda: agent)
+        init_playbook_run_delivery_callback(_cli_playbook_run_delivery)
+        init_playbook_run_reject_callback(_cli_playbook_run_reject)
+        from mose import playbook_decision as _pd
+
+        _pd._runtime["await_playbook_runs"] = True
+        try:
+            applied = await handle_playbook_decision(slug, approved=(action == "approve"))
+        finally:
+            _pd._runtime.pop("await_playbook_runs", None)
+            await mcp.close()
+        memory.close()
+        print(f"{slug}: {'applied' if applied else 'noop (already decided, duplicate, or unknown)'}")
+        return 0 if applied else 1
+
+    if row is not None and row.kind == "upcoming_add":
+        store = UpcomingStore(config.upcoming.db_path)
+        from mose.upcoming_decision import init_upcoming_decision_runtime
+
+        init_upcoming_decision_runtime(memory=memory, store=store, config=config, execute_codemode=None)
+        init_upcoming_delivery_callback(_cli_upcoming_delivery)
+        applied = await handle_upcoming_decision(slug, approved=(action == "approve"), line_spec=line_spec)
+        store.close()
+        memory.close()
+        print(f"{slug}: {'applied' if applied else 'noop (already decided or unknown)'}")
         return 0 if applied else 1
 
     init_skill_decision_runtime(learner=learner, memory=memory, llm=llm)
@@ -741,6 +854,68 @@ async def _run_skill_review_once(config, *, notify: bool) -> int:
         memory.close()
 
 
+async def _run_upcoming_sync_once(config) -> int:
+    store = UpcomingStore(config.upcoming.db_path)
+    try:
+        result = await run_daily_sync(store, config.upcoming)
+        print(json.dumps({k: v for k, v in result.items() if k != "stats"}, indent=2))
+        if result.get("stats"):
+            print(json.dumps(result["stats"], indent=2, default=str))
+        return 0 if result.get("status") == "ok" else 1
+    finally:
+        store.close()
+
+
+async def _run_upcoming_recommend_once(config) -> int:
+    store = UpcomingStore(config.upcoming.db_path)
+    memory = MemoryManager(config.memory)
+    init_upcoming_notify(_cli_upcoming_notify)
+    init_upcoming_failure_notify(_cli_upcoming_failure)
+    try:
+        result = await run_weekly_recommend(
+            store,
+            config.upcoming,
+            log_dir=config.observe.log_dir,
+            memory=memory,
+            recipient=(config.signal.admin_group_id or "").strip() or "cli",
+        )
+        print(json.dumps({k: v for k, v in result.items() if k != "items"}, indent=2, default=str))
+        return 0 if result.get("status") == "ok" else 1
+    finally:
+        store.close()
+        memory.close()
+
+
+async def _run_upcoming_attach_test(config, path: str) -> int:
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+    if not p.is_file():
+        print(f"File not found: {path}")
+        return 1
+    if not signal_runtime_ready(config.signal):
+        print(f"Signal is not configured. File exists at {p.resolve()}")
+        return 2
+    from mose.signal_bot import MoseSignalBot
+
+    class _Dummy:
+        memory = None
+
+    bot = MoseSignalBot(_Dummy(), config.signal)  # type: ignore[arg-type]
+    try:
+        await bot._connect()
+        bot._reader_task = asyncio.create_task(bot._reader_loop())
+        await bot._send_message(
+            config.signal.admin_group_id,
+            "Upcoming attach test — if you see this file, outbound attachments work.",
+            attachments=[str(p.resolve())],
+        )
+        print("Sent test attachment to Signal admin group.")
+        return 0
+    finally:
+        await bot.close()
+
+
 async def main() -> None:
     args = _parse_args(sys.argv[1:])
     config = load_config()
@@ -756,9 +931,13 @@ async def main() -> None:
         sys.exit(code)
 
     if args.decide:
-        slug, decision = args.decide
+        if len(args.decide) < 2:
+            print("Usage: python -m mose --decide SLUG DECISION [LINES]")
+            sys.exit(2)
+        slug, decision = args.decide[0], args.decide[1]
+        line_spec = ",".join(args.decide[2:]) if len(args.decide) > 2 else None
         log_event(logger, "skill_decide_cli", slug=slug, decision=decision)
-        code = await _run_decide_once(config, slug, decision)
+        code = await _run_decide_once(config, slug, decision, line_spec)
         sys.exit(code)
 
     if args.sweep_approvals:
@@ -802,6 +981,21 @@ async def main() -> None:
         code = await _run_scheduled_task_run_now_cli(config, args.scheduled_task_run_now.strip())
         sys.exit(code)
 
+    if args.upcoming_sync:
+        log_event(logger, "upcoming_sync_cli")
+        code = await _run_upcoming_sync_once(config)
+        sys.exit(code)
+
+    if args.upcoming_recommend:
+        log_event(logger, "upcoming_recommend_cli")
+        code = await _run_upcoming_recommend_once(config)
+        sys.exit(code)
+
+    if args.upcoming_attach_test:
+        log_event(logger, "upcoming_attach_test_cli", path=args.upcoming_attach_test)
+        code = await _run_upcoming_attach_test(config, args.upcoming_attach_test)
+        sys.exit(code)
+
     log_event(logger, "startup", llm_endpoint=config.llm.endpoint)
 
     # Initialize workspace sandbox
@@ -825,6 +1019,9 @@ async def main() -> None:
             from mose.signal_bot import (
                 MoseSignalBot,
                 _signal_approval_callback,
+                _signal_playbook_propose_callback,
+                _signal_playbook_run_delivery,
+                _signal_playbook_run_reject,
                 _signal_skill_propose_callback,
                 _signal_skill_recovery_notice,
                 _signal_skill_review_notify,
@@ -833,6 +1030,9 @@ async def main() -> None:
                 _signal_task_propose_callback,
                 _signal_tracker_alert,
                 _signal_tracker_propose_callback,
+                _signal_upcoming_delivery,
+                _signal_upcoming_failure,
+                _signal_upcoming_notify,
             )
             init_skill_promotion(_signal_skill_propose_callback)
             init_skill_reminder(None)  # superseded by the consolidated recovery notice
@@ -843,6 +1043,12 @@ async def main() -> None:
             init_task_propose_callback(_signal_task_propose_callback)
             init_task_delivery_callback(_signal_task_delivery)
             init_task_failure_callback(_signal_task_failure)
+            init_playbook_propose_callback(_signal_playbook_propose_callback)
+            init_playbook_run_delivery_callback(_signal_playbook_run_delivery)
+            init_playbook_run_reject_callback(_signal_playbook_run_reject)
+            init_upcoming_notify(_signal_upcoming_notify)
+            init_upcoming_failure_notify(_signal_upcoming_failure)
+            init_upcoming_delivery_callback(_signal_upcoming_delivery)
             init_approval(_signal_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
@@ -851,6 +1057,7 @@ async def main() -> None:
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
             agent.start_task_scheduler_loop()
+            agent.start_upcoming_loop()
             bot = MoseSignalBot(agent, config.signal)
 
             async def _signal_startup_recovery() -> None:
@@ -872,6 +1079,7 @@ async def main() -> None:
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
                 await agent.stop_task_scheduler_loop()
+                await agent.stop_upcoming_loop()
                 await bot.close()
         elif config.discord.token:
             from mose.discord_bot import (
@@ -890,6 +1098,12 @@ async def main() -> None:
             init_task_propose_callback(None)
             init_task_delivery_callback(_cli_task_delivery)
             init_task_failure_callback(_cli_task_failure)
+            init_playbook_propose_callback(None)
+            init_playbook_run_delivery_callback(_cli_playbook_run_delivery)
+            init_playbook_run_reject_callback(_cli_playbook_run_reject)
+            init_upcoming_notify(_cli_upcoming_notify)
+            init_upcoming_failure_notify(_cli_upcoming_failure)
+            init_upcoming_delivery_callback(_cli_upcoming_delivery)
             init_approval(_discord_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
@@ -901,6 +1115,7 @@ async def main() -> None:
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
             agent.start_task_scheduler_loop()
+            agent.start_upcoming_loop()
             bot = MoseDiscordBot(agent)
             log_event(logger, "starting_discord_bot")
             try:
@@ -912,6 +1127,7 @@ async def main() -> None:
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
                 await agent.stop_task_scheduler_loop()
+                await agent.stop_upcoming_loop()
                 await bot.close()
         else:
             init_skill_promotion(_cli_skill_propose_callback)
@@ -923,6 +1139,12 @@ async def main() -> None:
             init_task_propose_callback(_cli_task_propose_callback)
             init_task_delivery_callback(_cli_task_delivery)
             init_task_failure_callback(_cli_task_failure)
+            init_playbook_propose_callback(_cli_playbook_propose_callback)
+            init_playbook_run_delivery_callback(_cli_playbook_run_delivery)
+            init_playbook_run_reject_callback(_cli_playbook_run_reject)
+            init_upcoming_notify(_cli_upcoming_notify)
+            init_upcoming_failure_notify(_cli_upcoming_failure)
+            init_upcoming_delivery_callback(_cli_upcoming_delivery)
             init_approval(_cli_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             log_event(logger, "cli_mode")
@@ -942,6 +1164,7 @@ async def main() -> None:
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
             agent.start_task_scheduler_loop()
+            agent.start_upcoming_loop()
             try:
                 await _run_cli(agent)
             finally:
@@ -949,6 +1172,7 @@ async def main() -> None:
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
                 await agent.stop_task_scheduler_loop()
+                await agent.stop_upcoming_loop()
     finally:
         from mose.approval_bridge import stop_approval_bridge
 

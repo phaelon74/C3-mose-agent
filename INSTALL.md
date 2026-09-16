@@ -369,12 +369,15 @@ sudo cp worker-agent.service        /etc/systemd/system/
 sudo cp mose-agent.service          /etc/systemd/system/
 sudo cp mose-skill-review.service   /etc/systemd/system/
 sudo cp mose-skill-review.timer     /etc/systemd/system/
+sudo cp mose-upcoming-sync.service  /etc/systemd/system/   # optional, upcoming catalog
+sudo cp mose-upcoming-sync.timer    /etc/systemd/system/
 sudo cp signal-cli-daemon.service   /etc/systemd/system/   # optional, Signal only
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now worker-agent
 sudo systemctl enable --now mose-agent
 sudo systemctl enable --now mose-skill-review.timer
+sudo systemctl enable --now mose-upcoming-sync.timer      # optional catch-up if agent was down
 ```
 
 Check status and logs:
@@ -760,6 +763,18 @@ Optional: `SIGNAL_MAX_ATTACHMENT_BYTES` (default 10 MiB), `SIGNAL_MAX_IMAGES_PER
 The signal-cli daemon must receive attachments (do not run JSON-RPC mode with
 `--ignore-attachments`).
 
+**Outbound attachments:** Mose can attach a file on `send` (used by the weekly
+upcoming-media report). signal-cli JSON-RPC `send` params include
+`attachments: ["/absolute/path/to/file.md"]` on the first message chunk.
+Verify with:
+
+```bash
+python -m mose --upcoming-attach-test data/logs/test.md
+```
+
+If send fails, Mose falls back to a summary plus the on-disk path (same as
+skill-review reports). Requires signal-cli 0.13+ (0.14.x as documented above).
+
 ### E.5 Wire the agent
 
 Set all three variables in `.env`. If `SIGNAL_PHONE` is set but either group id
@@ -892,6 +907,31 @@ agent's only outputs — an operator must review and action them.
 
 ---
 
+## F.1 Upcoming movies / TV / anime catalog
+
+Mose keeps a local TMDB catalog (`data/upcoming.db`) for the current and next
+calendar year, snapshots Radarr and Sonarr daily, and posts a weekly Markdown
+list (40 movies / 40 TV / 20 anime, trending-ranked) to the Signal **admin**
+group as an attachment.
+
+Set `TMDB_API_KEY` plus `RADARR_URL` / `RADARR_API_KEY` / `SONARR_URL` /
+`SONARR_API_KEY` in `.env` so the **agent process** can snapshot libraries
+(same values as the *arr MCP sidecars). Optional `TVDB_API_KEY` is used only
+when TMDB omits `tvdb_id` on a series the weekly list would otherwise recommend.
+See `[upcoming]` in `config.toml`.
+
+```bash
+python -m mose --upcoming-sync
+python -m mose --upcoming-recommend
+python -m mose --upcoming-attach-test data/logs/test.md
+```
+
+Approve in Signal: `approve upcoming-YYYY-Www` or `approve upcoming-YYYY-Www 1,4,7`.
+
+Optional systemd catch-up: `mose-upcoming-sync.timer` (daily `--upcoming-sync`).
+
+---
+
 ## G. Operational security notes
 
 - **Non-root everywhere.** The `mose` user has no sudo rights on bare metal;
@@ -961,6 +1001,8 @@ agent's only outputs — an operator must review and action them.
 ├── mose-agent.service                  # systemd unit — the agent
 ├── mose-skill-review.service           # systemd unit — one-shot skill review
 ├── mose-skill-review.timer             # systemd unit — weekly review schedule
+├── mose-upcoming-sync.service          # systemd unit — one-shot upcoming catalog sync
+├── mose-upcoming-sync.timer            # systemd unit — daily upcoming sync catch-up
 ├── worker-agent.service                # systemd unit — vLLM LLM server
 ├── signal-cli-daemon.service           # systemd unit — signal-cli JSON-RPC
 ├── mose/                               # Source code

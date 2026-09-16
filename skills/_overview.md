@@ -16,7 +16,7 @@ Mose runs in a **sandbox** (agent container or restricted host). Integrated back
 1. **`mcp-portal__portal_codemode_search`** — `query` describes what you need (e.g. `"plex active sessions"`, `"sonarr queue"`).
 2. **`mcp-portal__portal_codemode_execute`** — TypeScript calling `mcp.<server_key>.<tool>(args)` and **`console.log(JSON.stringify(...))`** the facts you report.
 3. Read stdout only. If empty, log the raw object and fix field paths — do not invent data.
-4. Mutating MCP tools require **admin approval** (Signal/Discord).
+4. Mutating MCP tools require **admin approval** (Signal/Discord) per action — unless running via an **approved playbook** or **scheduled task** allowlist (`playbook_run_propose` / scheduled task). See `playbook-delete-search`.
 
 ### MCP server keys (compose name → TypeScript)
 
@@ -58,3 +58,4 @@ API keys exist only in MCP sidecar environments. Do not reference `$PLEX_TOKEN`,
 | **purge-queue-samples** | List and remove Sonarr/Radarr queue rows that are sample-only downloads (Code Mode; `load_skill` for full runbook). |
 | **purge-queue-empty** | List and remove Sonarr/Radarr queue rows with zero/empty downloads (Code Mode; `load_skill` for full runbook). |
 | **sonarr-replace-episodes** | Delete wrong episode files and trigger `EpisodeSearch` for specific episodes (wrong language, bad quality). |
+| **upcoming-media** | Weekly TMDB catalog vs local Radarr/Sonarr snapshots; approve the Markdown list to add titles. |

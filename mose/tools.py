@@ -118,6 +118,10 @@ _scheduled_task_memory: Any | None = None
 _scheduled_task_config: Any | None = None
 _get_task_scheduler: Callable[[], Any | None] | None = None
 
+# Playbooks — set by init_playbook_tool_context() at startup
+_playbook_memory: Any | None = None
+_playbook_config: Any | None = None
+
 _scheduled_exec_ctx: ContextVar[dict[str, Any] | None] = ContextVar(
     "scheduled_exec_ctx", default=None
 )
@@ -197,6 +201,16 @@ def init_scheduled_task_tool_context(
     _scheduled_task_memory = memory
     _scheduled_task_config = config
     _get_task_scheduler = get_scheduler
+
+
+def init_playbook_tool_context(
+    *,
+    memory: Any,
+    config: Any,
+) -> None:
+    global _playbook_memory, _playbook_config
+    _playbook_memory = memory
+    _playbook_config = config
 
 
 def _open_scheduled_task_memory() -> Any | None:
@@ -984,9 +998,116 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "playbook_propose",
+            "description": (
+                "Propose a reusable on-demand playbook (human must approve). "
+                "No schedule — invoke later with playbook_run_propose. "
+                "Requires execution_plan with procedure and allowed_tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Unique kebab-case id."},
+                    "description": {"type": "string", "description": "What this playbook does."},
+                    "user_prompt_template": {
+                        "type": "string",
+                        "description": "Guidance for filling user_prompt on each invocation.",
+                    },
+                    "system_addendum": {"type": "string"},
+                    "execution_plan": {
+                        "type": "object",
+                        "description": "procedure (str), allowed_tools (list), optional codemode_scripts.",
+                    },
+                    "created_by_session": {"type": "string"},
+                },
+                "required": ["slug", "description", "execution_plan"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "playbook_update_propose",
+            "description": "Propose changes to an existing playbook (admin approval required).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_slug": {"type": "string"},
+                    "description": {"type": "string"},
+                    "user_prompt_template": {"type": "string"},
+                    "system_addendum": {"type": "string"},
+                    "execution_plan": {"type": "object"},
+                },
+                "required": ["target_slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "playbook_delete_propose",
+            "description": "Propose deletion of a playbook (admin approval required).",
+            "parameters": {
+                "type": "object",
+                "properties": {"target_slug": {"type": "string"}},
+                "required": ["target_slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "playbook_list",
+            "description": "List active playbooks (not pending proposals).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "playbook_run_propose",
+            "description": (
+                "After read-only preflight, propose one bundled admin approval for a playbook run. "
+                "On approve, mutating tools in allowed_tools run without per-action prompts. "
+                "Requires preflight_summary with findings before delete/mutate."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "playbook_slug": {"type": "string"},
+                    "invocation_params": {
+                        "type": "object",
+                        "description": "e.g. series, season, episodes",
+                    },
+                    "preflight_summary": {
+                        "type": "string",
+                        "description": "Read-only findings: ids, languages, hasFile, etc.",
+                    },
+                    "user_prompt": {
+                        "type": "string",
+                        "description": "Fully resolved instructions for the authorized run.",
+                    },
+                    "run_slug": {"type": "string", "description": "Optional; default run-{playbook}-{id}."},
+                    "reply_session_id": {
+                        "type": "string",
+                        "description": "Session to attribute results (current chat session).",
+                    },
+                },
+                "required": [
+                    "playbook_slug",
+                    "invocation_params",
+                    "preflight_summary",
+                    "user_prompt",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "pending_approvals_list",
             "description": (
-                "List proposals awaiting human admin approval (skill, tracker, scheduled task). "
+                "List proposals awaiting human admin approval (skill, tracker, scheduled task, playbook). "
                 "Read-only — you cannot approve or reject. "
                 "Use when asked about pending proposals; do not infer from tracker_list or scheduled_task_list."
             ),
@@ -997,7 +1118,8 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": (
                             "Optional filter: skill_proposal, tracker_proposal, tracker_deletion, "
-                            "scheduled_task_proposal, scheduled_task_update, scheduled_task_deletion."
+                            "scheduled_task_proposal, scheduled_task_update, scheduled_task_deletion, "
+                            "playbook_proposal, playbook_update, playbook_deletion, playbook_run_proposal."
                         ),
                     },
                     "include_payload": {
@@ -1077,6 +1199,7 @@ async def call_native_tool(
     context: str = "",
     llm: LLMExtractor | None = None,
     root: Path | None = None,
+    session_id: str = "",
 ) -> str:
     """Dispatch a native tool call and return the result string."""
     if isinstance(arguments, str):
@@ -1092,7 +1215,13 @@ async def call_native_tool(
 
     log_event(logger, "native_tool_call", tool=name)
     try:
-        return await handler(arguments, context=context, llm=llm, root=root)
+        return await handler(
+            arguments,
+            context=context,
+            llm=llm,
+            root=root,
+            session_id=session_id,
+        )
     except Exception as e:
         logger.exception(f"Native tool error: {name}")
         return f"Error executing {name}: {e}"
@@ -2398,6 +2527,231 @@ async def _tool_scheduled_task_run_now(args: dict, **kwargs) -> str:
     return await sch.run_once(slug)
 
 
+async def _tool_playbook_propose(args: dict, **kwargs) -> str:
+    from mose.playbook_decision import PLAYBOOK_PROPOSAL_KIND, notify_playbook_proposal
+
+    if _playbook_memory is None or _playbook_config is None:
+        return "Error: playbook subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(slug):
+        return "Error: slug must match kebab-case [a-z0-9]+(-[a-z0-9]+)*."
+    desc = str(args.get("description") or "").strip()
+    if not desc:
+        return "Error: description is required."
+    plan = args.get("execution_plan")
+    if not isinstance(plan, dict):
+        return "Error: execution_plan must be an object."
+    allowed = plan.get("allowed_tools")
+    if not isinstance(allowed, list) or not allowed:
+        return "Error: execution_plan.allowed_tools must be a non-empty list."
+    procedure = str(plan.get("procedure") or "").strip()
+    if not procedure:
+        return "Error: execution_plan.procedure is required."
+    recipient = str(getattr(_playbook_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_playbook_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {
+        "playbook_slug": slug,
+        "proposal_kind": PLAYBOOK_PROPOSAL_KIND,
+        "description": desc,
+        "user_prompt_template": args.get("user_prompt_template"),
+        "system_addendum": args.get("system_addendum"),
+        "execution_plan": plan,
+        "created_by_session": args.get("created_by_session"),
+    }
+    _playbook_memory.save_pending_approval(
+        slug=slug,
+        kind=PLAYBOOK_PROPOSAL_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_playbook_proposal(slug, payload, expires_at)
+    return (
+        f"Playbook proposal '{slug}' recorded. "
+        "Awaiting admin approval (approve <slug> in Signal or python -m mose --decide <slug> y)."
+    )
+
+
+async def _tool_playbook_update_propose(args: dict, **kwargs) -> str:
+    from mose.playbook_decision import PLAYBOOK_UPDATE_KIND, notify_playbook_proposal
+
+    if _playbook_memory is None or _playbook_config is None:
+        return "Error: playbook subsystem not initialized."
+    target = str(args.get("target_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(target):
+        return "Error: target_slug must be kebab-case."
+    current = _playbook_memory.get_playbook(target)
+    if current is None:
+        return f"Error: no playbook named '{target}'."
+    updates: dict[str, Any] = {}
+    before: dict[str, Any] = {}
+    if "description" in args and args["description"] is not None:
+        desc = str(args["description"]).strip()
+        if not desc:
+            return "Error: description must be non-empty when provided."
+        updates["description"] = desc
+        before["description"] = current.description
+    if "user_prompt_template" in args:
+        updates["user_prompt_template"] = args["user_prompt_template"]
+        before["user_prompt_template"] = current.user_prompt_template
+    if "system_addendum" in args:
+        updates["system_addendum"] = args["system_addendum"]
+        before["system_addendum"] = current.system_addendum
+    if "execution_plan" in args and args["execution_plan"] is not None:
+        plan = args["execution_plan"]
+        if not isinstance(plan, dict):
+            return "Error: execution_plan must be an object."
+        allowed = plan.get("allowed_tools")
+        if not isinstance(allowed, list) or not allowed:
+            return "Error: execution_plan.allowed_tools must be a non-empty list."
+        procedure = str(plan.get("procedure") or "").strip()
+        if not procedure:
+            return "Error: execution_plan.procedure is required."
+        updates["execution_plan"] = plan
+        before["execution_plan"] = current.execution_plan
+    if not updates:
+        return "Error: no fields to update."
+    pending_slug = f"playbook-upd-{target}"
+    recipient = str(getattr(_playbook_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_playbook_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {
+        "target_slug": target,
+        "pending_slug": pending_slug,
+        "proposal_kind": PLAYBOOK_UPDATE_KIND,
+        "description": f"Update playbook {target}",
+        "updates": updates,
+        "before": before,
+    }
+    _playbook_memory.save_pending_approval(
+        slug=pending_slug,
+        kind=PLAYBOOK_UPDATE_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_playbook_proposal(pending_slug, payload, expires_at)
+    return (
+        f"Update proposal '{pending_slug}' recorded for playbook '{target}'. "
+        "Awaiting admin approval (approve <pending_slug> in Signal or python -m mose --decide <pending_slug> y)."
+    )
+
+
+async def _tool_playbook_delete_propose(args: dict, **kwargs) -> str:
+    from mose.playbook_decision import PLAYBOOK_DELETION_KIND, notify_playbook_proposal
+
+    if _playbook_memory is None or _playbook_config is None:
+        return "Error: playbook subsystem not initialized."
+    target = str(args.get("target_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(target):
+        return "Error: target_slug must be kebab-case."
+    if _playbook_memory.get_playbook(target) is None:
+        return f"Error: no playbook named '{target}'."
+    pending_slug = f"playbook-del-{target}"
+    recipient = str(getattr(_playbook_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_playbook_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {"target_slug": target, "description": f"Delete playbook {target}"}
+    _playbook_memory.save_pending_approval(
+        slug=pending_slug,
+        kind=PLAYBOOK_DELETION_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_playbook_proposal(pending_slug, payload, expires_at)
+    return (
+        f"Deletion proposal '{pending_slug}' recorded. "
+        "Admin must approve: python -m mose --decide <slug> y|n"
+    )
+
+
+async def _tool_playbook_list(args: dict, **kwargs) -> str:
+    if _playbook_memory is None:
+        return "Error: playbook subsystem not initialized."
+    playbooks = _playbook_memory.list_playbooks()
+    out = []
+    for p in playbooks:
+        plan = p.execution_plan or {}
+        out.append(
+            {
+                "slug": p.slug,
+                "description": p.description,
+                "allowed_tools": plan.get("allowed_tools") or [],
+                "user_prompt_template": p.user_prompt_template,
+            }
+        )
+    return json.dumps(out, indent=2)
+
+
+async def _tool_playbook_run_propose(args: dict, **kwargs) -> str:
+    from mose.playbook_decision import PLAYBOOK_RUN_PROPOSAL_KIND, notify_playbook_proposal
+
+    if _playbook_memory is None or _playbook_config is None:
+        return "Error: playbook subsystem not initialized."
+    playbook_slug = str(args.get("playbook_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(playbook_slug):
+        return "Error: playbook_slug must be kebab-case."
+    playbook = _playbook_memory.get_playbook(playbook_slug)
+    if playbook is None:
+        return f"Error: no playbook named '{playbook_slug}'."
+    preflight = str(args.get("preflight_summary") or "").strip()
+    if not preflight:
+        return "Error: preflight_summary is required (run read-only checks first)."
+    user_prompt = str(args.get("user_prompt") or "").strip()
+    if not user_prompt:
+        return "Error: user_prompt is required."
+    invocation_params = args.get("invocation_params")
+    if not isinstance(invocation_params, dict):
+        return "Error: invocation_params must be an object."
+    run_slug = str(args.get("run_slug") or "").strip()
+    if not run_slug:
+        run_slug = f"run-{playbook_slug}-{secrets.token_hex(4)}"
+    if not _VALID_TRACKER_SLUG.match(run_slug):
+        return "Error: run_slug must be kebab-case."
+    plan = playbook.execution_plan or {}
+    if not plan.get("allowed_tools"):
+        return f"Error: playbook '{playbook_slug}' has empty allowed_tools."
+    recipient = str(getattr(_playbook_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_playbook_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    reply_session = str(args.get("reply_session_id") or kwargs.get("session_id") or "").strip()
+    payload = {
+        "playbook_slug": playbook_slug,
+        "run_slug": run_slug,
+        "proposal_kind": PLAYBOOK_RUN_PROPOSAL_KIND,
+        "description": playbook.description,
+        "invocation_params": invocation_params,
+        "preflight_summary": preflight,
+        "user_prompt": user_prompt,
+        "execution_plan": plan,
+        "system_addendum": playbook.system_addendum,
+        "reply_session_id": reply_session or None,
+    }
+    _playbook_memory.save_pending_approval(
+        slug=run_slug,
+        kind=PLAYBOOK_RUN_PROPOSAL_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_playbook_proposal(run_slug, payload, expires_at)
+    return (
+        f"Playbook run proposal '{run_slug}' recorded for '{playbook_slug}'. "
+        "Awaiting admin approval (approve <run_slug> in Signal or python -m mose --decide <run_slug> y). "
+        "Mutating tools will run without per-action prompts once approved."
+    )
+
+
 _APPROVAL_KINDS = frozenset({
     "skill_proposal",
     "tracker_proposal",
@@ -2405,12 +2759,16 @@ _APPROVAL_KINDS = frozenset({
     "scheduled_task_proposal",
     "scheduled_task_update",
     "scheduled_task_deletion",
+    "playbook_proposal",
+    "playbook_update",
+    "playbook_deletion",
+    "playbook_run_proposal",
 })
 
 
 def _get_approvals_memory() -> Any | None:
-    """Shared MemoryManager used by tracker and scheduled-task subsystems."""
-    return _tracker_memory or _scheduled_task_memory
+    """Shared MemoryManager used by tracker, scheduled-task, and playbook subsystems."""
+    return _tracker_memory or _scheduled_task_memory or _playbook_memory
 
 
 def _format_approval_timestamp(ts: float) -> str:
@@ -2533,6 +2891,11 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "scheduled_task_pause": _tool_scheduled_task_pause,
     "scheduled_task_resume": _tool_scheduled_task_resume,
     "scheduled_task_run_now": _tool_scheduled_task_run_now,
+    "playbook_propose": _tool_playbook_propose,
+    "playbook_update_propose": _tool_playbook_update_propose,
+    "playbook_delete_propose": _tool_playbook_delete_propose,
+    "playbook_list": _tool_playbook_list,
+    "playbook_run_propose": _tool_playbook_run_propose,
     "pending_approvals_list": _tool_pending_approvals_list,
     "skill_proposal_get": _tool_skill_proposal_get,
 }

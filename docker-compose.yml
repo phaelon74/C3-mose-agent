@@ -207,6 +207,11 @@ services:
       SIGNAL_PHONE: ${SIGNAL_PHONE:-}
       SIGNAL_ENGAGEMENT_GROUP_ID: ${SIGNAL_ENGAGEMENT_GROUP_ID:-}
       SIGNAL_ADMIN_GROUP_ID: ${SIGNAL_ADMIN_GROUP_ID:-}
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      RADARR_URL: ${RADARR_URL:-}
+      RADARR_API_KEY: ${RADARR_API_KEY:-}
+      SONARR_URL: ${SONARR_URL:-}
+      SONARR_API_KEY: ${SONARR_API_KEY:-}
       # Code Mode: POST /approve for mutating MCP (portal reaches this via mose-net).
       MOSE_PORTAL_ENABLED: "1"
     # extra_hosts maps host.docker.internal on Linux (native on macOS/Windows).

@@ -31,6 +31,7 @@ def inline_agent(tmp_path):
     setup_logging(str(tmp_path / "logs"), "DEBUG")
     config = Config()
     config.memory.db_path = str(tmp_path / "test.db")
+    config.upcoming.db_path = str(tmp_path / "upcoming.db")
     config.agent.skills_path = str(tmp_path / "noskills")
 
     llm = MagicMock(spec=LLMClient)
@@ -66,6 +67,7 @@ def test_build_llm_tools_merges_mcp_when_inline_flag_false(tmp_path):
     setup_logging(str(tmp_path / "logs"), "DEBUG")
     config = Config()
     config.memory.db_path = str(tmp_path / "test.db")
+    config.upcoming.db_path = str(tmp_path / "upcoming.db")
     config.agent.skills_path = str(tmp_path / "noskills")
     config.agent.inline_mcp_tools = False
 
@@ -94,6 +96,7 @@ def test_build_llm_tools_server_allowlist(tmp_path):
     setup_logging(str(tmp_path / "logs"), "DEBUG")
     config = Config()
     config.memory.db_path = str(tmp_path / "test3.db")
+    config.upcoming.db_path = str(tmp_path / "upcoming3.db")
     config.agent.skills_path = str(tmp_path / "noskills")
     config.agent.inline_mcp_servers = ["srv"]
 

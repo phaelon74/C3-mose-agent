@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from arr_diagnostics.client import ArrClient, json_response, safe_tool_decorator, truncate_output
+from arr_diagnostics.client import ArrClient, compact_movie_row, json_response, paginate_index, safe_tool_decorator, truncate_output
 from arr_diagnostics.radarr_manual_import import manual_import_commit as radarr_manual_import_commit
 
 RADARR_COMMANDS = frozenset({
@@ -241,6 +241,24 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
         if languageId is not None:
             params["languageId"] = languageId
         return json_response(c.get_json("/movie", params or None))
+
+    @tool()
+    def radarr_library_index(page: int = 1, pageSize: int = 400) -> str:
+        """Compact GET /movie index (tmdbId, id, title, year, hasFile, path). Paginated."""
+        raw = c.get_json("/movie")
+        rows = raw if isinstance(raw, list) else []
+        compact = [compact_movie_row(r) for r in rows if isinstance(r, dict)]
+        return json_response(paginate_index(compact, page=page, page_size=pageSize), max_chars=240000)
+
+    @tool()
+    def radarr_get_rootfolder() -> str:
+        """GET /rootfolder — library root folders."""
+        return json_response(c.get_json("/rootfolder"), max_chars=80000)
+
+    @tool()
+    def radarr_get_qualityprofile() -> str:
+        """GET /qualityprofile — quality profiles (id, name)."""
+        return json_response(c.get_json("/qualityprofile"), max_chars=80000)
 
     @tool()
     def radarr_get_movie_lookup(term: str) -> str:

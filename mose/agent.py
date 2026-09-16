@@ -30,6 +30,10 @@ from mose.llm import LLMClient
 from mose.memory import MemoryManager, ScheduledTaskRow
 from mose.mcp_manager import MCPManager
 from mose.observe import get_logger, log_event, log_duration
+from mose.playbook_decision import (
+    format_playbook_recovery_message,
+    init_playbook_decision_runtime,
+)
 from mose.task_decision import (
     format_task_recovery_message,
     init_task_decision_runtime,
@@ -37,12 +41,19 @@ from mose.task_decision import (
 from mose.task_scheduler import TaskScheduler
 from mose.tracker_decision import format_tracker_recovery_message, init_tracker_decision_runtime
 from mose.trackers import TrackerScheduler
+from mose.upcoming_decision import (
+    format_upcoming_recovery_message,
+    init_upcoming_decision_runtime,
+)
+from mose.upcoming_store import UpcomingStore
+from mose.upcoming import UpcomingLoop
 from mose.tools import (
     NATIVE_TOOLS,
     call_native_tool,
     enter_scheduled_execution,
     execute_mcp_tool,
     exit_scheduled_execution,
+    init_playbook_tool_context,
     init_scheduled_task_tool_context,
     init_tracker_tool_context,
     is_native_tool,
@@ -170,6 +181,17 @@ Prefer this over delegate for coding work.
 - For Code Mode tasks, list **mutating** MCP tools in ``allowed_tools`` too (e.g. ``sonarr-diagnostics__sonarr_delete_queue_item``), not only ``mcp-portal__portal_codemode_execute``. Once the task is approved, scheduled runs bypass per-run admin approval for those tools.
 - Schedule times use the **scheduler timezone** shown below (not UTC unless that is the configured zone).
 - Trackers (above) are metric collectors; scheduled tasks are full agent runs with an approved tool allowlist.
+
+### Playbooks (on-demand agent runs)
+- Tools: ``playbook_propose``, ``playbook_update_propose``, ``playbook_list``, ``playbook_run_propose``, ``playbook_delete_propose``.
+- ``playbook_list`` shows **active** playbooks only — not pending proposals. Use ``pending_approvals_list`` for proposals awaiting admin approval.
+- When the user says "run playbook X for …", use ``playbook_list``, ``load_skill`` as needed, then:
+  1. Run **read-only** preflight (series lookup, episode files, audio languages) in normal chat — no mutating tools.
+  2. Call ``playbook_run_propose`` with ``preflight_summary``, ``invocation_params``, and a fully resolved ``user_prompt``.
+  3. Wait for admin approval — one bundled approval for all mutating steps; do **not** call mutating tools directly in normal chat when a playbook covers the workflow.
+- Playbook definitions are created/edited via ``playbook_propose`` / ``playbook_update_propose`` (admin approval). Same ``execution_plan`` shape as scheduled tasks (procedure, allowed_tools, codemode_scripts).
+- Playbooks have **no schedule** — they run only when invoked via ``playbook_run_propose`` + admin approval.
+- Pass ``reply_session_id`` (current session) in ``playbook_run_propose`` so results return to the requesting channel.
 
 ## Guidelines
 - Act, don't ask. You have tools — use them. Install packages, run commands, create files, scan networks. \
@@ -403,6 +425,21 @@ class Agent:
         self._task_scheduler: TaskScheduler | None = None
         self._tracker_compact_task: asyncio.Task[Any] | None = None
         self._tracker_compact_runs: int = 0
+        self.upcoming_store = UpcomingStore(self.config.upcoming.db_path)
+        self._upcoming_loop: UpcomingLoop | None = None
+
+        async def _upcoming_codemode(code: str, timeout: int) -> tuple[str, bool]:
+            return await execute_mcp_tool(
+                "mcp-portal__portal_codemode_execute",
+                {"code": code, "timeout_seconds": min(120, max(5, int(timeout)))},
+            )
+
+        init_upcoming_decision_runtime(
+            memory=self.memory,
+            store=self.upcoming_store,
+            config=self.config,
+            execute_codemode=_upcoming_codemode,
+        )
         init_tracker_tool_context(
             memory=self.memory,
             config=self.config,
@@ -417,10 +454,18 @@ class Agent:
             config=self.config,
             get_scheduler=self._get_task_scheduler,
         )
+        init_playbook_tool_context(
+            memory=self.memory,
+            config=self.config,
+        )
         init_task_decision_runtime(
             memory=self.memory,
             get_scheduler=self._get_task_scheduler,
             timezone=self.config.scheduler.timezone,
+        )
+        init_playbook_decision_runtime(
+            memory=self.memory,
+            get_agent=lambda: self,
         )
         init_context_compress(self.config)
 
@@ -640,6 +685,7 @@ class Agent:
                         result = await call_native_tool(
                             tc.name, tc.arguments,
                             context=text_for_memory, llm=self.llm,
+                            session_id=session_id,
                         )
                     else:
                         parsed = _coerce_tool_arguments(tc.arguments)
@@ -996,12 +1042,23 @@ class Agent:
         parts = [
             format_tracker_recovery_message(self.memory, recipient=recipient),
             format_task_recovery_message(self.memory, recipient=recipient),
+            format_playbook_recovery_message(self.memory, recipient=recipient),
+            format_upcoming_recovery_message(self.memory, recipient=recipient),
         ]
         return "\n".join(p for p in parts if p.strip())
 
-    async def run_scheduled_task(self, task: ScheduledTaskRow) -> dict[str, Any]:
-        """Execute one approved scheduled task with tool allowlist enforcement."""
-        plan = task.execution_plan or {}
+    async def run_authorized_task(
+        self,
+        *,
+        slug: str,
+        user_prompt: str,
+        execution_plan: dict[str, Any],
+        system_addendum: str | None,
+        session_id: str,
+        context_label: str = "Authorized Task",
+    ) -> dict[str, Any]:
+        """Execute an agent run with tool allowlist enforcement and approval bypass."""
+        plan = execution_plan or {}
         allowed_raw = plan.get("allowed_tools") or []
         allowed = frozenset(str(t).strip() for t in allowed_raw if str(t).strip())
         if not allowed:
@@ -1012,8 +1069,8 @@ class Agent:
             }
 
         parts: list[str] = []
-        if task.system_addendum:
-            parts.append(str(task.system_addendum))
+        if system_addendum:
+            parts.append(str(system_addendum))
         procedure = plan.get("procedure")
         if procedure:
             parts.append(f"Approved procedure:\n{procedure}")
@@ -1027,14 +1084,14 @@ class Agent:
                     script_lines.append(f"- {purpose}:\n```\n{code}\n```")
             parts.append("\n".join(script_lines))
         parts.append(
-            "You may ONLY use these tools (others will be blocked): "
+            f"{context_label}: you may ONLY use these tools (others will be blocked): "
             + ", ".join(sorted(allowed))
         )
         addendum = "\n\n".join(parts)
         max_rounds = int(plan.get("max_tool_rounds") or 15)
         tool_trace: list[dict[str, str]] = []
 
-        exec_token = enter_scheduled_execution(task.slug, allowed)
+        exec_token = enter_scheduled_execution(slug, allowed)
         proc_token = enter_process_overrides(
             system_addendum=addendum,
             skip_skill_proposal=True,
@@ -1042,7 +1099,7 @@ class Agent:
             tool_trace=tool_trace,
         )
         try:
-            content = await self.process(task.user_prompt, f"scheduled-{task.slug}")
+            content = await self.process(user_prompt, session_id)
         finally:
             exit_scheduled_execution(exec_token)
             exit_process_overrides(proc_token)
@@ -1054,6 +1111,40 @@ class Agent:
             status = "failed"
 
         return {"status": status, "summary": content, "tool_trace": tool_trace}
+
+    async def run_scheduled_task(self, task: ScheduledTaskRow) -> dict[str, Any]:
+        """Execute one approved scheduled task with tool allowlist enforcement."""
+        return await self.run_authorized_task(
+            slug=task.slug,
+            user_prompt=task.user_prompt,
+            execution_plan=task.execution_plan or {},
+            system_addendum=task.system_addendum,
+            session_id=f"scheduled-{task.slug}",
+            context_label="Scheduled Task Context",
+        )
+
+    async def run_playbook_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Execute an approved playbook run from pending-approval payload."""
+        run_slug = str(payload.get("run_slug") or "playbook-run")
+        playbook_slug = str(payload.get("playbook_slug") or run_slug)
+        user_prompt = str(payload.get("user_prompt") or "")
+        execution_plan = payload.get("execution_plan") or {}
+        system_addendum = payload.get("system_addendum")
+        if system_addendum is not None:
+            system_addendum = str(system_addendum)
+
+        playbook = self.memory.get_playbook(playbook_slug)
+        if playbook and not system_addendum and playbook.system_addendum:
+            system_addendum = playbook.system_addendum
+
+        return await self.run_authorized_task(
+            slug=run_slug,
+            user_prompt=user_prompt,
+            execution_plan=execution_plan if isinstance(execution_plan, dict) else {},
+            system_addendum=system_addendum,
+            session_id=f"playbook-run-{run_slug}",
+            context_label="Playbook Run Context",
+        )
 
     def _get_task_scheduler(self) -> TaskScheduler | None:
         return self._task_scheduler
@@ -1086,6 +1177,20 @@ class Agent:
             return
         await self._task_scheduler.stop()
         self._task_scheduler = None
+
+    def start_upcoming_loop(self) -> None:
+        if not self.config.upcoming.enabled:
+            return
+        if self._upcoming_loop is not None:
+            return
+        self._upcoming_loop = UpcomingLoop(self.config, self.upcoming_store, memory=self.memory)
+        self._upcoming_loop.start()
+
+    async def stop_upcoming_loop(self) -> None:
+        if self._upcoming_loop is None:
+            return
+        await self._upcoming_loop.stop()
+        self._upcoming_loop = None
 
     async def run_tracker_compaction_once(self, *, vacuum: bool = False) -> dict[str, int]:
         """One-shot compaction (CLI / operator)."""

@@ -171,6 +171,36 @@ CREATE TABLE IF NOT EXISTS scheduled_approval_sessions (
 CREATE INDEX IF NOT EXISTS idx_scheduled_approval_sessions_exp ON scheduled_approval_sessions(expires_at);
 """
 
+PLAYBOOKS_SQL = """
+CREATE TABLE IF NOT EXISTS playbooks (
+    id INTEGER PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL,
+    user_prompt_template TEXT,
+    system_addendum TEXT,
+    execution_plan TEXT NOT NULL,
+    created_by_session TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_playbooks_slug ON playbooks(slug);
+CREATE TABLE IF NOT EXISTS playbook_runs (
+    id INTEGER PRIMARY KEY,
+    playbook_id INTEGER NOT NULL,
+    run_slug TEXT UNIQUE NOT NULL,
+    invocation_params TEXT,
+    preflight_summary TEXT,
+    user_prompt TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    finished_at REAL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    tool_trace TEXT,
+    FOREIGN KEY (playbook_id) REFERENCES playbooks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_runs_pid ON playbook_runs(playbook_id, started_at);
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -247,6 +277,34 @@ class ScheduledTaskRunRow:
 
 
 @dataclass
+class PlaybookRow:
+    id: int
+    slug: str
+    description: str
+    user_prompt_template: str | None
+    system_addendum: str | None
+    execution_plan: dict[str, Any]
+    created_by_session: str | None
+    created_at: float
+    updated_at: float | None
+
+
+@dataclass
+class PlaybookRunRow:
+    id: int
+    playbook_id: int
+    run_slug: str
+    invocation_params: dict[str, Any]
+    preflight_summary: str | None
+    user_prompt: str
+    started_at: float
+    finished_at: float | None
+    status: str
+    summary: str | None
+    tool_trace: list[Any]
+
+
+@dataclass
 class TrackerRow:
     id: int
     slug: str
@@ -290,6 +348,7 @@ class MemoryManager:
         self._ensure_trackers()
         self._ensure_scheduled_tasks()
         self._ensure_scheduled_approval_sessions()
+        self._ensure_playbooks()
         log_event(logger, "memory_initialized", db_path=config.db_path)
 
     def _init_schema(self) -> None:
@@ -347,6 +406,14 @@ class MemoryManager:
         ).fetchone()
         if not row:
             self.db.executescript(SCHEDULED_APPROVAL_SESSIONS_SQL)
+            self.db.commit()
+
+    def _ensure_playbooks(self) -> None:
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='playbooks'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(PLAYBOOKS_SQL)
             self.db.commit()
 
     def save_scheduled_approval_session(
@@ -1585,6 +1652,217 @@ class MemoryManager:
         )
         self.db.commit()
         return int(cur.rowcount)
+
+    def _row_to_playbook(self, row: tuple[Any, ...] | None) -> PlaybookRow | None:
+        if row is None:
+            return None
+        (
+            pid,
+            slug,
+            description,
+            user_prompt_template,
+            system_addendum,
+            execution_plan,
+            created_by_session,
+            created_at,
+            updated_at,
+        ) = row
+        return PlaybookRow(
+            id=int(pid),
+            slug=str(slug),
+            description=str(description),
+            user_prompt_template=str(user_prompt_template) if user_prompt_template else None,
+            system_addendum=str(system_addendum) if system_addendum else None,
+            execution_plan=self._parse_json_dict(execution_plan),
+            created_by_session=created_by_session,
+            created_at=float(created_at),
+            updated_at=float(updated_at) if updated_at is not None else None,
+        )
+
+    def _row_to_playbook_run(self, row: tuple[Any, ...] | None) -> PlaybookRunRow | None:
+        if row is None:
+            return None
+        (
+            rid,
+            playbook_id,
+            run_slug,
+            invocation_params,
+            preflight_summary,
+            user_prompt,
+            started_at,
+            finished_at,
+            status,
+            summary,
+            tool_trace,
+        ) = row
+        return PlaybookRunRow(
+            id=int(rid),
+            playbook_id=int(playbook_id),
+            run_slug=str(run_slug),
+            invocation_params=self._parse_json_dict(invocation_params),
+            preflight_summary=str(preflight_summary) if preflight_summary else None,
+            user_prompt=str(user_prompt),
+            started_at=float(started_at),
+            finished_at=float(finished_at) if finished_at is not None else None,
+            status=str(status),
+            summary=str(summary) if summary is not None else None,
+            tool_trace=self._parse_json_list(tool_trace),
+        )
+
+    def create_playbook(
+        self,
+        *,
+        slug: str,
+        description: str,
+        execution_plan: dict[str, Any],
+        user_prompt_template: str | None = None,
+        system_addendum: str | None = None,
+        created_by_session: str | None = None,
+    ) -> int:
+        now = time.time()
+        cur = self.db.execute(
+            "INSERT INTO playbooks (slug, description, user_prompt_template, system_addendum, "
+            "execution_plan, created_by_session, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                slug,
+                description,
+                user_prompt_template,
+                system_addendum,
+                json.dumps(execution_plan),
+                created_by_session,
+                now,
+                now,
+            ),
+        )
+        self.db.commit()
+        log_event(logger, "playbook_created", slug=slug, playbook_id=cur.lastrowid)
+        return int(cur.lastrowid)
+
+    def update_playbook(self, slug: str, **fields: Any) -> bool:
+        if not fields:
+            return False
+        allowed = {
+            "description",
+            "user_prompt_template",
+            "system_addendum",
+            "execution_plan",
+        }
+        sets: list[str] = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k == "execution_plan":
+                v = json.dumps(v if v is not None else {})
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        vals.append(time.time())
+        vals.append(slug)
+        cur = self.db.execute(
+            f"UPDATE playbooks SET {', '.join(sets)} WHERE slug = ?",
+            vals,
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def delete_playbook(self, slug: str) -> bool:
+        cur = self.db.execute("DELETE FROM playbooks WHERE slug = ?", (slug,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def get_playbook(self, slug: str) -> PlaybookRow | None:
+        row = self.db.execute(
+            "SELECT id, slug, description, user_prompt_template, system_addendum, "
+            "execution_plan, created_by_session, created_at, updated_at "
+            "FROM playbooks WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return self._row_to_playbook(row)
+
+    def list_playbooks(self) -> list[PlaybookRow]:
+        rows = self.db.execute(
+            "SELECT id, slug, description, user_prompt_template, system_addendum, "
+            "execution_plan, created_by_session, created_at, updated_at "
+            "FROM playbooks ORDER BY slug"
+        ).fetchall()
+        return [p for p in (self._row_to_playbook(r) for r in rows) if p is not None]
+
+    def insert_playbook_run(
+        self,
+        playbook_id: int,
+        *,
+        run_slug: str,
+        user_prompt: str,
+        invocation_params: dict[str, Any] | None = None,
+        preflight_summary: str | None = None,
+        started_at: float,
+        status: str,
+        finished_at: float | None = None,
+        summary: str | None = None,
+        tool_trace: list[Any] | None = None,
+    ) -> int:
+        cur = self.db.execute(
+            "INSERT INTO playbook_runs "
+            "(playbook_id, run_slug, invocation_params, preflight_summary, user_prompt, "
+            "started_at, finished_at, status, summary, tool_trace) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                playbook_id,
+                run_slug,
+                json.dumps(invocation_params or {}),
+                preflight_summary,
+                user_prompt,
+                started_at,
+                finished_at,
+                status,
+                summary,
+                json.dumps(tool_trace or []),
+            ),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def update_playbook_run(
+        self,
+        run_id: int,
+        *,
+        finished_at: float | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+        tool_trace: list[Any] | None = None,
+    ) -> bool:
+        fields: dict[str, Any] = {}
+        if finished_at is not None:
+            fields["finished_at"] = finished_at
+        if status is not None:
+            fields["status"] = status
+        if summary is not None:
+            fields["summary"] = summary
+        if tool_trace is not None:
+            fields["tool_trace"] = json.dumps(tool_trace)
+        if not fields:
+            return False
+        sets = [f"{k} = ?" for k in fields]
+        vals = list(fields.values()) + [run_id]
+        cur = self.db.execute(
+            f"UPDATE playbook_runs SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def get_playbook_run(self, run_slug: str) -> PlaybookRunRow | None:
+        row = self.db.execute(
+            "SELECT id, playbook_id, run_slug, invocation_params, preflight_summary, "
+            "user_prompt, started_at, finished_at, status, summary, tool_trace "
+            "FROM playbook_runs WHERE run_slug = ?",
+            (run_slug,),
+        ).fetchone()
+        return self._row_to_playbook_run(row)
 
     def close(self) -> None:
         self.db.close()

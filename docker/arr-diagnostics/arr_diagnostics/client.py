@@ -182,3 +182,45 @@ def json_response(data: Any, max_chars: int = 20000) -> str:
     if len(s) > max_chars:
         return s[:max_chars] + f"\n\n... truncated ({len(s)} chars total)"
     return s
+
+
+def compact_movie_row(movie: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tmdbId": movie.get("tmdbId"),
+        "id": movie.get("id"),
+        "title": movie.get("title"),
+        "year": movie.get("year"),
+        "hasFile": movie.get("hasFile"),
+        "path": movie.get("path"),
+    }
+
+
+def compact_series_row(series: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tvdbId": series.get("tvdbId"),
+        "id": series.get("id"),
+        "title": series.get("title"),
+        "year": series.get("year"),
+        "rootFolderPath": series.get("rootFolderPath"),
+        "seriesType": series.get("seriesType"),
+        "path": series.get("path"),
+    }
+
+
+def paginate_index(
+    items: list[dict[str, Any]],
+    *,
+    page: int = 1,
+    page_size: int = 400,
+) -> dict[str, Any]:
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 2000))
+    total = len(items)
+    start = (page - 1) * page_size
+    return {
+        "page": page,
+        "pageSize": page_size,
+        "total": total,
+        "totalPages": (total + page_size - 1) // page_size if page_size else 1,
+        "items": items[start : start + page_size],
+    }

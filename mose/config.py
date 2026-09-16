@@ -210,6 +210,44 @@ class SchedulerConfig:
 
 
 @dataclass
+class UpcomingConfig:
+    """Upcoming movies/TV/anime catalog (TMDB) and weekly *arr recommendations."""
+
+    enabled: bool = True
+    db_path: str = "data/upcoming.db"
+    tmdb_api_key: str = ""
+    daily_hour: int = 5
+    weekly_weekday: str = "monday"
+    weekly_hour: int = 9
+    timezone: str = ""  # empty → inherit [scheduler].timezone
+    sync_max_age_hours: int = 26
+    recommendation_horizon_days: int = 180
+    min_popularity: float = 5.0
+    min_vote_count: int = 20
+    cap_movies: int = 40
+    cap_tv: int = 40
+    cap_anime: int = 20
+    failure_threshold: int = 3
+    startup_delay_seconds: int = 180
+    reconcile_interval_seconds: int = 60
+    catalog_retention_years: int = 2
+    recommendation_retention_days: int = 90
+    sonarr_tv_root_match: str = "/TV"
+    sonarr_anime_root_match: str = "/Anime"
+    sonarr_tv_root_path: str = ""
+    sonarr_anime_root_path: str = ""
+    radarr_root_path: str = ""
+    radarr_quality_profile_id: int = 0
+    sonarr_tv_quality_profile_id: int = 0
+    sonarr_anime_quality_profile_id: int = 0
+    radarr_url: str = ""
+    radarr_api_key: str = ""
+    sonarr_url: str = ""
+    sonarr_api_key: str = ""
+    tvdb_api_key: str = ""
+
+
+@dataclass
 class LearningConfig:
     """Skill proposal/learning loop and periodic skill-quality review.
 
@@ -251,6 +289,7 @@ class Config:
     trackers: TrackersConfig = field(default_factory=TrackersConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     portal: PortalConfig = field(default_factory=PortalConfig)
+    upcoming: UpcomingConfig = field(default_factory=UpcomingConfig)
     root_dir: Path = _ROOT
 
 
@@ -295,6 +334,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.scheduler, raw["scheduler"])
         if "portal" in raw:
             _apply_section(cfg.portal, raw["portal"])
+        if "upcoming" in raw:
+            _apply_section(cfg.upcoming, raw["upcoming"])
 
     # Env var overrides
     if token := os.environ.get("DISCORD_TOKEN"):
@@ -369,6 +410,21 @@ def load_config(config_path: Path | None = None) -> Config:
     if (stz := os.environ.get("SCHEDULER_TIMEZONE")) is not None and str(stz).strip():
         cfg.scheduler.timezone = str(stz).strip()
 
+    if (ue := _env_optional_bool("UPCOMING_ENABLED")) is not None:
+        cfg.upcoming.enabled = ue
+    if tmdb := os.environ.get("TMDB_API_KEY"):
+        cfg.upcoming.tmdb_api_key = tmdb.strip()
+    if ru := os.environ.get("RADARR_URL"):
+        cfg.upcoming.radarr_url = ru.strip()
+    if rk := os.environ.get("RADARR_API_KEY"):
+        cfg.upcoming.radarr_api_key = rk.strip()
+    if su := os.environ.get("SONARR_URL"):
+        cfg.upcoming.sonarr_url = su.strip()
+    if sk := os.environ.get("SONARR_API_KEY"):
+        cfg.upcoming.sonarr_api_key = sk.strip()
+    if tvdb := os.environ.get("TVDB_API_KEY"):
+        cfg.upcoming.tvdb_api_key = tvdb.strip()
+
     cfg.signal.phone_number = (cfg.signal.phone_number or "").strip()
     cfg.signal.engagement_group_id = (cfg.signal.engagement_group_id or "").strip()
     cfg.signal.admin_group_id = (cfg.signal.admin_group_id or "").strip()
@@ -388,5 +444,9 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.learning.rejected_dir = str(cfg.root_dir / cfg.learning.rejected_dir)
     if not Path(cfg.learning.review_log_dir).is_absolute():
         cfg.learning.review_log_dir = str(cfg.root_dir / cfg.learning.review_log_dir)
+    if not Path(cfg.upcoming.db_path).is_absolute():
+        cfg.upcoming.db_path = str(cfg.root_dir / cfg.upcoming.db_path)
+    if not (cfg.upcoming.timezone or "").strip():
+        cfg.upcoming.timezone = cfg.scheduler.timezone
 
     return cfg

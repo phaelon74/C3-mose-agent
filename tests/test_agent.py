@@ -170,6 +170,7 @@ class TestAgent:
 
         config = Config()
         config.memory.db_path = str(tmp_path / "test.db")
+        config.upcoming.db_path = str(tmp_path / "upcoming.db")
         config.agent.skills_path = str(tmp_path / "noskills")  # No skills in unit tests
 
         llm = MagicMock(spec=LLMClient)

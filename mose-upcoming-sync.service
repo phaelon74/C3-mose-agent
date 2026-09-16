@@ -1,0 +1,16 @@
+[Unit]
+Description=Mose Agent - Upcoming media catalog sync (oneshot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mose
+WorkingDirectory=/home/mose/mose-agent
+EnvironmentFile=-/home/mose/mose-agent/.env
+ExecStart=/home/mose/mose-agent/.venv/bin/python -m mose --upcoming-sync
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

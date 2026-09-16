@@ -1,6 +1,8 @@
 # Sonarr — Replace Episodes (delete-then-search)
 
-Use when specific episodes have the **wrong audio language**, bad quality, samples, or otherwise need a fresh grab. Requires admin approval for delete and episode search.
+Use when specific episodes have the **wrong audio language**, bad quality, samples, or otherwise need a fresh grab.
+
+**Preferred:** invoke playbook `delete-search` via `playbook_run_propose` (one bundled admin approval). See `load_skill playbook-delete-search`.
 
 Reach Sonarr **only** through Code Mode (`mcp.sonarr_diagnostics.*`). See `load_skill sonarr` for library lookup and audio-language checks.
 

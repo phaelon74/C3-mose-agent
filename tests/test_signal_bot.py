@@ -335,3 +335,25 @@ async def test_sre_execute_prompt_goes_to_admin_and_notifies_engagement():
     assert any(g == "adm-gid" and "SRE Execute Approval" in t for g, t in sent)
     assert any(g == "eng-gid" and "Awaiting admin approval" in t for g, t in sent)
     assert any(g == "adm-gid" and "timed out" in t.lower() for g, t in sent)
+
+
+@pytest.mark.asyncio
+async def test_send_message_includes_attachments(tmp_path):
+    agent = AsyncMock()
+    config = _signal_config()
+    bot = MoseSignalBot(agent, config)
+    captured: list[dict] = []
+
+    async def fake_rpc(method: str, params=None):
+        captured.append({"method": method, "params": params})
+        return {}
+
+    bot._send_rpc = fake_rpc  # type: ignore[method-assign]
+    md = tmp_path / "upcoming-2026-W12.md"
+    md.write_text("# hi\n", encoding="utf-8")
+    await bot._send_message("adm-gid", "Weekly list", attachments=[str(md)])
+    assert captured
+    params = captured[0]["params"]
+    assert params["groupId"] == "adm-gid"
+    assert params["message"] == "Weekly list"
+    assert params["attachments"] == [str(md.resolve())]

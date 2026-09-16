@@ -45,6 +45,8 @@ def test_plex_stack_automation(bare: str, expected: str) -> None:
         ("sonarr_get_series", "read"),
         ("sonarr_get_series_by_id", "read"),
         ("sonarr_get_series_lookup", "read"),
+        ("sonarr_library_index", "read"),
+        ("sonarr_get_rootfolder", "read"),
         ("sonarr_post_queue_import", "write"),
     ],
 )
@@ -57,6 +59,9 @@ def test_sonarr_diagnostics(bare: str, expected: str) -> None:
     [
         ("radarr_get_movie", "read"),
         ("radarr_get_movie_lookup", "read"),
+        ("radarr_library_index", "read"),
+        ("radarr_get_rootfolder", "read"),
+        ("radarr_get_qualityprofile", "read"),
         ("radarr_delete_queue_item", "write"),
         ("radarr_command_RssSync", "write"),
         ("radarr_post_indexer_test", "write"),
