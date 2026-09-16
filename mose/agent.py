@@ -55,6 +55,7 @@ from mose.tools import (
     exit_scheduled_execution,
     init_playbook_tool_context,
     init_scheduled_task_tool_context,
+    init_skill_tool_context,
     init_tracker_tool_context,
     is_native_tool,
     verify_tool_result,
@@ -166,11 +167,13 @@ Prefer this over delegate for coding work.
 
 ### Creating / updating skills
 - Production skills live under **skills_path** (e.g. ``/app/skills``), loaded into your system prompt — **not** ``workspace/skills/``.
-- ``write_file`` only writes inside the workspace; it **cannot** install a production skill file.
+- ``write_file`` only writes inside the workspace; it **cannot** install a production skill file. Never treat a workspace copy as live.
+- **New skill:** call ``skill_propose`` with ``slug``, ``description``, ``rationale``, and ``draft_markdown`` (the full Markdown you would have written). Do not stop at ``write_file``.
+- **Existing skill:** call ``skill_propose_update`` with ``target_slug`` and ``draft_markdown``. ``skill_propose`` refuses slugs that already exist.
+- If you already wrote drafts under the workspace, ``read_file`` them and pass the contents as ``draft_markdown`` so they survive workspace cleanup.
+- Durable install: admin Signal approval (``approve <slug>`` or ``approve skill-upd-<slug>``) writes ``skills/{{slug}}.md``. You cannot approve.
+- Tools: ``skill_propose``, ``skill_propose_update``, ``pending_approvals_list``, ``skill_proposal_get``. Pending skill proposals are **not** visible via ``scheduled_task_list`` or ``tracker_list``.
 - When the user asks to create or document a skill: ``load_skill`` **sonarr**, **radarr**, and **_overview** as needed; reuse the **actual** ``portal_codemode_execute`` TypeScript from the task — never substitute ``bash``/``find``/``ls`` on download paths or ``curl`` to *arr APIs.
-- Durable install: the learning proposal flow (admin Signal approval) or the operator commits markdown into the repo ``skills/`` tree — do not claim a workspace copy is live.
-- Tools: ``pending_approvals_list``, ``skill_proposal_get``. Pending skill proposals are **not** visible via ``scheduled_task_list`` or ``tracker_list``.
-- You can list and describe pending skill proposals but **cannot** approve them. Tell the admin to reply ``approve <slug>`` on Signal (or ``python -m mose --decide <slug> y`` on the host).
 
 ### Scheduled Tasks (calendar agent runs)
 - Tools: ``scheduled_task_propose``, ``scheduled_task_update_propose``, ``scheduled_task_list``, ``scheduled_task_run_now``, ``scheduled_task_pause``, ``scheduled_task_resume``, ``scheduled_task_delete_propose``.
@@ -466,6 +469,11 @@ class Agent:
         init_playbook_decision_runtime(
             memory=self.memory,
             get_agent=lambda: self,
+        )
+        init_skill_tool_context(
+            learner=self._skill_learner,
+            memory=self.memory,
+            config=self.config,
         )
         init_context_compress(self.config)
 

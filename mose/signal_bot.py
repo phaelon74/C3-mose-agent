@@ -59,12 +59,20 @@ async def _signal_skill_propose_callback(
         logger.warning("signal_skill_propose_no_admin_group", extra={"slug": slug})
         return
 
+    is_update = slug.startswith("skill-upd-")
+    heading = "Skill update proposal" if is_update else "New skill proposal"
+    approve_hint = (
+        "This overwrites the existing production skill on approve."
+        if is_update
+        else "This creates a new production skill on approve."
+    )
     prompt = (
-        "New skill proposal\n\n"
+        f"{heading}\n\n"
         f"Slug: {slug}\n"
         f"Title: {title}\n"
         f"Description: {description}\n\n"
         f"Rationale:\n{rationale}\n\n"
+        f"{approve_hint}\n"
         f"Proposal file: {path}\n"
         f"Expires: {_format_ts(expires_at)} (UTC)\n\n"
         f"Reply with either of the following to approve:\n"
@@ -483,7 +491,11 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
         if slug is None:
             if memory is None:
                 return False
-            approved = memory.list_approved_approvals(kind="skill_proposal")
+            approved = [
+                r
+                for r in memory.list_approved_approvals()
+                if getattr(r, "kind", "") in ("skill_proposal", "skill_update")
+            ]
             if len(approved) != 1:
                 await bot._send_message(
                     admin_gid,
@@ -599,7 +611,14 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
     from mose.learning import handle_skill_decision
     applied = await handle_skill_decision(slug, approved=approved)
     if applied:
-        verb = "approved — building now" if approved else "rejected"
+        if approved:
+            verb = (
+                "approved — applying update now"
+                if row.kind == "skill_update"
+                else "approved — building now"
+            )
+        else:
+            verb = "rejected"
         await bot._send_message(admin_gid, f"Skill '{slug}' {verb}.")
     else:
         await bot._send_message(

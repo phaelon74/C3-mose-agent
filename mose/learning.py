@@ -224,10 +224,68 @@ def format_tool_trace_for_prompt(tool_trace: list[dict[str, str]] | None) -> str
     return "\n".join(parts)
 
 
+SKILL_PROPOSAL_KIND = "skill_proposal"
+SKILL_UPDATE_KIND = "skill_update"
+SKILL_APPROVAL_KINDS = frozenset({SKILL_PROPOSAL_KIND, SKILL_UPDATE_KIND})
+SKILL_UPDATE_PENDING_PREFIX = "skill-upd-"
+MAX_SKILL_DRAFT_CHARS = 200_000
+
+
+def pending_slug_for_skill(skill_slug: str, *, is_update: bool) -> str:
+    """Pending-approval slug: skill name for creates, ``skill-upd-<slug>`` for updates."""
+    if is_update:
+        return f"{SKILL_UPDATE_PENDING_PREFIX}{skill_slug}"
+    return skill_slug
+
+
+def skill_target_slug(row: Any) -> str:
+    """Skill filename slug from a pending_approvals row (create or update)."""
+    payload = getattr(row, "payload", None) or {}
+    if isinstance(payload, dict):
+        target = str(payload.get("target_slug") or payload.get("skill_slug") or "").strip()
+        if target:
+            return target
+    slug = str(getattr(row, "slug", "") or "")
+    if slug.startswith(SKILL_UPDATE_PENDING_PREFIX):
+        return slug[len(SKILL_UPDATE_PENDING_PREFIX) :]
+    return slug
+
+
+def _compose_skill_markdown(
+    *,
+    slug: str,
+    title: str,
+    description: str,
+    session_id: str,
+    body: str,
+    version: str = "0.1.0",
+) -> str:
+    """Turn a body (optional YAML frontmatter) into the on-disk skill file."""
+    body = _strip_code_fence(body or "").strip()
+    if body.lstrip().startswith("---"):
+        return body if body.endswith("\n") else body + "\n"
+    frontmatter = (
+        "---\n"
+        f"name: {slug}\n"
+        f"description: {description or title}\n"
+        f'version: "{version}"\n'
+        f"source_session: {session_id}\n"
+        f"approved_at: {datetime.now(timezone.utc).isoformat()}\n"
+        "---\n\n"
+    )
+    if body.lstrip().startswith("#"):
+        content = frontmatter + body
+    else:
+        content = frontmatter + f"# {title}\n\n" + body
+    return content if content.endswith("\n") else content + "\n"
+
+
 class SkillLearner:
     """Draft and review reusable SRE skills with strict human-in-the-loop control."""
 
-    APPROVAL_KIND = "skill_proposal"
+    APPROVAL_KIND = SKILL_PROPOSAL_KIND
+    UPDATE_KIND = SKILL_UPDATE_KIND
+    SKILL_KINDS = SKILL_APPROVAL_KINDS
 
     def __init__(
         self,
@@ -355,23 +413,154 @@ class SkillLearner:
         title = str(data.get("title", "")).strip() or slug
         description = str(data.get("description", "")).strip()
         rationale = str(data.get("rationale", "")).strip()
+        path, error = await self._stage_proposal(
+            skill_slug=slug,
+            title=title,
+            description=description,
+            rationale=rationale,
+            session_id=session_id,
+            user_message=user_message,
+            assistant_reply=assistant_reply,
+            memory=memory,
+            recipient=recipient,
+            tool_trace=trace,
+            is_update=False,
+        )
+        if error:
+            log_event(logger, "skill_propose_skipped", session_id=session_id, rationale=error[:200])
+        return path
+
+    async def propose_from_tool(
+        self,
+        *,
+        slug: str,
+        title: str,
+        description: str,
+        rationale: str,
+        is_update: bool,
+        draft_markdown: str = "",
+        session_id: str = "",
+        user_message: str = "",
+        memory: Any | None = None,
+        recipient: str = "",
+    ) -> str:
+        """Stage a create or update proposal from a native tool call.
+
+        Writes ``skills/pending/{pending_slug}.proposal.json`` (including
+        ``draft_markdown`` when provided) and a durable ``pending_approvals``
+        row. Does not write production ``skills/{slug}.md`` until the admin
+        approves. Returns a short status string for the tool result.
+        """
+        if not self._cfg.enabled:
+            return "Error: skill learning is disabled."
+        skill_slug = str(slug or "").strip().lower()
+        title = str(title or "").strip() or skill_slug.replace("-", " ").title()
+        description = str(description or "").strip()
+        rationale = str(rationale or "").strip()
+        draft = str(draft_markdown or "")
+        if not description:
+            return "Error: description is required."
+        if not rationale:
+            return "Error: rationale is required."
+        if is_update and not draft.strip():
+            return (
+                "Error: skill_propose_update requires draft_markdown "
+                "(the full updated skill body). Do not use write_file as the install step."
+            )
+        if len(draft) > MAX_SKILL_DRAFT_CHARS:
+            return (
+                f"Error: draft_markdown is {len(draft)} chars; "
+                f"max is {MAX_SKILL_DRAFT_CHARS}."
+            )
+        path, error = await self._stage_proposal(
+            skill_slug=skill_slug,
+            title=title,
+            description=description,
+            rationale=rationale,
+            session_id=session_id,
+            user_message=user_message,
+            assistant_reply="",
+            memory=memory,
+            recipient=recipient,
+            is_update=is_update,
+            draft_markdown=draft,
+        )
+        if error:
+            return f"Error: {error}"
+        if path is None or not path.exists():
+            return (
+                "Error: proposal was not left pending (no admin notification channel). "
+                "The skill was not installed."
+            )
+        pending = pending_slug_for_skill(skill_slug, is_update=is_update)
+        kind = "update" if is_update else "create"
+        has_draft = "Draft body is staged in the proposal JSON." if draft.strip() else (
+            "No draft_markdown provided; the skill body will be LLM-drafted on approve."
+        )
+        return (
+            f"Skill {kind} proposal '{pending}' recorded for '{skill_slug}'. "
+            f"{has_draft} "
+            "Awaiting admin approval "
+            f"(approve {pending} in Signal or python -m mose --decide {pending} y). "
+            "A workspace copy is not live."
+        ) if path else "Error: failed to stage skill proposal."
+
+    async def _stage_proposal(
+        self,
+        *,
+        skill_slug: str,
+        title: str,
+        description: str,
+        rationale: str,
+        session_id: str,
+        user_message: str,
+        assistant_reply: str,
+        memory: Any | None,
+        recipient: str,
+        tool_trace: list[dict[str, str]] | None = None,
+        is_update: bool = False,
+        draft_markdown: str = "",
+    ) -> tuple[Path | None, str]:
+        """Persist proposal JSON + pending row, then fire-and-forget notify.
+
+        Returns ``(path, "")`` on success or ``(None, error)``.
+        """
+        self._ensure_dirs()
+        slug = str(skill_slug or "").strip().lower()
         if not _valid_slug(slug):
             log_event(logger, "skill_propose_invalid_slug", slug=slug)
-            return None
+            return None, "slug must match kebab-case [a-z0-9]+(-[a-z0-9]+)*."
 
-        # If a skill with this slug already exists, do not re-propose.
-        if (self._skills_dir / f"{slug}.md").exists():
+        skill_file = self._skills_dir / f"{slug}.md"
+        if is_update:
+            if not skill_file.is_file():
+                log_event(logger, "skill_propose_update_missing", slug=slug)
+                return None, (
+                    f"no production skill named '{slug}'. "
+                    "Use skill_propose for a new skill."
+                )
+        elif skill_file.exists():
             log_event(logger, "skill_propose_exists", slug=slug)
-            return None
+            return None, (
+                f"skill '{slug}' already exists. "
+                "Use skill_propose_update to revise it."
+            )
 
-        # If a pending proposal for this slug already exists, do not duplicate.
+        pending_slug = pending_slug_for_skill(slug, is_update=is_update)
         if memory is not None:
-            existing = memory.get_pending_approval(slug)
+            existing = memory.get_pending_approval(pending_slug)
             if existing is not None and existing.status == "pending":
-                log_event(logger, "skill_propose_already_pending", slug=slug)
-                return None
+                log_event(logger, "skill_propose_already_pending", slug=pending_slug)
+                return None, f"a pending proposal for '{pending_slug}' already exists."
 
-        proposal = {
+        previous_markdown = ""
+        if is_update:
+            try:
+                previous_markdown = skill_file.read_text(encoding="utf-8")
+            except OSError:
+                previous_markdown = ""
+
+        proposal: dict[str, Any] = {
             "slug": slug,
             "title": title,
             "description": description,
@@ -380,33 +569,42 @@ class SkillLearner:
             "user_message": user_message,
             "assistant_reply": assistant_reply,
             "created_at": time.time(),
+            "is_update": is_update,
+            "pending_slug": pending_slug,
         }
-        if trace:
-            proposal["tool_trace"] = trace
-        proposal_path = self._pending / f"{slug}.proposal.json"
+        if tool_trace:
+            proposal["tool_trace"] = tool_trace
+        if draft_markdown.strip():
+            proposal["draft_markdown"] = draft_markdown
+        if previous_markdown:
+            proposal["previous_markdown"] = previous_markdown
+        proposal_path = self._pending / f"{pending_slug}.proposal.json"
         try:
             proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
         except OSError:
             logger.exception("failed to write skill proposal")
-            return None
+            return None, "failed to write proposal file."
 
         expires_at = time.time() + self._proposal_timeout_seconds
+        kind = self.UPDATE_KIND if is_update else self.APPROVAL_KIND
+        notify_title = f"Update: {title}" if is_update else title
 
-        # Durability boundary: persist BEFORE notifying. If the Signal send
-        # fails or the agent crashes right after, the proposal survives and
-        # will be handled by the next sweep / admin reply.
+        # Durability boundary: persist BEFORE notifying.
         if memory is not None:
             try:
                 memory.save_pending_approval(
-                    slug=slug,
-                    kind=self.APPROVAL_KIND,
+                    slug=pending_slug,
+                    kind=kind,
                     recipient=recipient,
                     proposal_path=str(proposal_path),
                     payload={
-                        "title": title,
+                        "title": notify_title,
                         "description": description,
                         "rationale": rationale,
                         "session_id": session_id,
+                        "target_slug": slug,
+                        "is_update": is_update,
+                        "has_draft": bool(draft_markdown.strip()),
                     },
                     expires_at=expires_at,
                 )
@@ -416,42 +614,47 @@ class SkillLearner:
                     proposal_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-                return None
+                return None, "failed to persist pending approval."
         else:
-            # No memory handle: fall back to an ephemeral proposal (no durability).
-            log_event(logger, "skill_proposal_non_durable", slug=slug)
+            log_event(logger, "skill_proposal_non_durable", slug=pending_slug)
 
         log_event(
             logger,
             "skill_proposed",
-            slug=slug,
-            title=title,
+            slug=pending_slug,
+            title=notify_title,
             path=str(proposal_path),
             session_id=session_id,
             expires_at=expires_at,
             recipient=recipient or None,
+            is_update=is_update,
         )
 
         if _skill_propose_callback is None:
             # Policy: never auto-build. No notification channel means no human
             # will ever approve, so mark the row rejected immediately to keep
             # the DB clean. (Pre-existing tests exercise this path.)
-            log_event(logger, "skill_proposal_no_callback", slug=slug)
+            log_event(logger, "skill_proposal_no_callback", slug=pending_slug)
             if memory is not None:
-                memory.decide_pending_approval(slug, approved=False)
+                memory.decide_pending_approval(pending_slug, approved=False)
             self._reject(proposal_path, reason="no_notification_channel")
-            return proposal_path
+            return proposal_path, ""
 
         try:
             result = _skill_propose_callback(
-                str(proposal_path), slug, title, description, rationale, expires_at
+                str(proposal_path),
+                pending_slug,
+                notify_title,
+                description,
+                rationale,
+                expires_at,
             )
             if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
                 await result
         except Exception:
             logger.exception("skill propose notification failed (proposal remains pending)")
 
-        return proposal_path
+        return proposal_path, ""
 
     async def handle_decision(
         self,
@@ -519,7 +722,11 @@ class SkillLearner:
         """
         self._ensure_dirs()
         now = time.time()
-        pending_rows = memory.list_pending_approvals(kind=self.APPROVAL_KIND)
+        pending_rows = [
+            r
+            for r in memory.list_pending_approvals(status="pending")
+            if r.kind in self.SKILL_KINDS
+        ]
         still_pending = [r for r in pending_rows if r.expires_at > now]
         expired_candidates = [r for r in pending_rows if r.expires_at <= now]
 
@@ -540,21 +747,27 @@ class SkillLearner:
                 )
 
         # --- Approved-but-unbuilt orphans ------------------------------------
-        approved_rows = memory.list_approved_approvals(kind=self.APPROVAL_KIND)
+        approved_rows = [
+            r
+            for r in memory.list_approved_approvals()
+            if r.kind in self.SKILL_KINDS
+        ]
         approved_unbuilt: list[Any] = []
         for row in approved_rows:
-            skill_file = self._skills_dir / f"{row.slug}.md"
-            if skill_file.exists():
-                continue  # already built in a previous session
             proposal_path = Path(row.proposal_path) if row.proposal_path else None
             if proposal_path is None or not proposal_path.exists():
-                # Proposal JSON is gone (archived) but the skill file is missing.
-                # Can't rebuild; log and skip — the admin can re-draft by hand.
+                # Proposal JSON is gone (archived). For creates, skip if the
+                # skill file is also missing. Updates already overwrote the file.
                 log_event(
                     logger,
                     "skill_orphan_missing_proposal",
                     slug=row.slug,
                 )
+                continue
+            skill_file = self._skills_dir / f"{skill_target_slug(row)}.md"
+            # Creates: file present means already built. Updates overwrite an
+            # existing file, so "unbuilt" means the proposal JSON is still here.
+            if row.kind != self.UPDATE_KIND and skill_file.exists():
                 continue
             approved_unbuilt.append(row)
             log_event(
@@ -609,8 +822,8 @@ class SkillLearner:
                     log_event(logger, "skill_grace_build_skipped", slug=slug,
                               reason="status_changed")
                     return
-                skill_file = self._skills_dir / f"{slug}.md"
-                if skill_file.exists():
+                skill_file = self._skills_dir / f"{skill_target_slug(current)}.md"
+                if current.kind != self.UPDATE_KIND and skill_file.exists():
                     log_event(logger, "skill_grace_build_skipped", slug=slug,
                               reason="already_built")
                     return
@@ -688,7 +901,11 @@ class SkillLearner:
 
         reminded = 0
         if reminder and _skill_reminder_callback is not None:
-            still_pending = memory.list_pending_approvals(kind=self.APPROVAL_KIND)
+            still_pending = [
+                r
+                for r in memory.list_pending_approvals(status="pending")
+                if r.kind in self.SKILL_KINDS
+            ]
             for row in still_pending:
                 try:
                     result = _skill_reminder_callback(
@@ -720,7 +937,7 @@ class SkillLearner:
     # ----------------------------------------------------------------- build
 
     async def build_approved_skill(self, proposal_path: Path, llm: Any) -> Path | None:
-        """Stage 2 — the human approved; now ask the LLM to draft the full skill body."""
+        """Stage 2 — the human approved; write the skill file from draft or LLM."""
         try:
             proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -735,46 +952,63 @@ class SkillLearner:
         title = str(proposal.get("title", slug)).strip()
         description = str(proposal.get("description", "")).strip()
         rationale = str(proposal.get("rationale", "")).strip()
+        is_update = bool(proposal.get("is_update"))
+        staged = str(proposal.get("draft_markdown") or "").strip()
 
-        trace_block = format_tool_trace_for_prompt(proposal.get("tool_trace"))
-        user_content = (
-            f"Slug: {slug}\nTitle: {title}\nDescription: {description}\n"
-            f"Rationale: {rationale}\n\n"
-            f"Source session:\nUser:\n{proposal.get('user_message', '')}\n\n"
-            f"Assistant:\n{proposal.get('assistant_reply', '')}\n"
-        )
-        if trace_block:
-            user_content += f"\n{trace_block}"
-
-        draft_prompt = [
-            {"role": "system", "content": SKILL_DRAFT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-
-        try:
-            response = await llm.chat(draft_prompt, temperature=0.3)
-            body = _strip_code_fence(response.content or "").strip()
-        except Exception:
-            logger.exception("skill body draft LLM call failed")
-            return None
-
-        if not body:
-            log_event(logger, "skill_build_empty_body", slug=slug)
-            return None
-
-        frontmatter = (
-            "---\n"
-            f"name: {slug}\n"
-            f"description: {description or title}\n"
-            'version: "0.1.0"\n'
-            f"source_session: {proposal.get('session_id', '')}\n"
-            f"approved_at: {datetime.now(timezone.utc).isoformat()}\n"
-            "---\n\n"
-        )
-        if body.lstrip().startswith("#"):
-            content = frontmatter + body
+        if staged:
+            content = _compose_skill_markdown(
+                slug=slug,
+                title=title,
+                description=description,
+                session_id=str(proposal.get("session_id", "")),
+                body=staged,
+            )
         else:
-            content = frontmatter + f"# {title}\n\n" + body
+            trace_block = format_tool_trace_for_prompt(proposal.get("tool_trace"))
+            user_content = (
+                f"Slug: {slug}\nTitle: {title}\nDescription: {description}\n"
+                f"Rationale: {rationale}\n\n"
+                f"Source session:\nUser:\n{proposal.get('user_message', '')}\n\n"
+                f"Assistant:\n{proposal.get('assistant_reply', '')}\n"
+            )
+            if is_update:
+                existing = ""
+                skill_existing = self._skills_dir / f"{slug}.md"
+                if skill_existing.is_file():
+                    try:
+                        existing = skill_existing.read_text(encoding="utf-8")
+                    except OSError:
+                        existing = ""
+                if not existing:
+                    existing = str(proposal.get("previous_markdown") or "")
+                if existing:
+                    user_content += f"\n## Current skill (revise this; do not drop working steps)\n{existing}\n"
+            if trace_block:
+                user_content += f"\n{trace_block}"
+
+            draft_prompt = [
+                {"role": "system", "content": SKILL_DRAFT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ]
+
+            try:
+                response = await llm.chat(draft_prompt, temperature=0.3)
+                body = _strip_code_fence(response.content or "").strip()
+            except Exception:
+                logger.exception("skill body draft LLM call failed")
+                return None
+
+            if not body:
+                log_event(logger, "skill_build_empty_body", slug=slug)
+                return None
+
+            content = _compose_skill_markdown(
+                slug=slug,
+                title=title,
+                description=description,
+                session_id=str(proposal.get("session_id", "")),
+                body=body,
+            )
 
         skill_path = self._skills_dir / f"{slug}.md"
         try:
@@ -797,6 +1031,7 @@ class SkillLearner:
             slug=slug,
             path=str(skill_path),
             bytes=len(content),
+            is_update=is_update,
         )
         return skill_path
 

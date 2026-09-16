@@ -13,6 +13,7 @@ import pytest
 from mose.config import LearningConfig, MemoryConfig
 from mose.learning import (
     SKILL_DRAFT_SYSTEM_PROMPT,
+    SKILL_UPDATE_KIND,
     SkillLearner,
     format_tool_trace_for_prompt,
     handle_skill_decision,
@@ -22,6 +23,7 @@ from mose.learning import (
     init_skill_reminder,
     init_skill_review,
     parse_explicit_skill_request,
+    pending_slug_for_skill,
 )
 from mose.llm import LLMResponse
 from mose.memory import MemoryManager
@@ -678,3 +680,177 @@ class TestToolTraceInBuild:
         proposal = json.loads(path.read_text(encoding="utf-8"))
         assert proposal["slug"] == "purge-queue-empty"
         memory.close()
+
+
+class TestProposeFromTool:
+    async def test_create_refuses_existing_skill(self, tmp_path):
+        async def notify(*_a, **_k):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        (tmp_path / "skills").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "purge-queue-empty.md").write_text("# old\n", encoding="utf-8")
+        msg = await learner.propose_from_tool(
+            slug="purge-queue-empty",
+            title="Purge Queue Empty",
+            description="d",
+            rationale="r",
+            is_update=False,
+            draft_markdown="# New\n",
+            memory=memory,
+            recipient="+1",
+        )
+        assert msg.startswith("Error:")
+        assert "skill_propose_update" in msg
+        memory.close()
+
+    async def test_update_refuses_missing_skill(self, tmp_path):
+        async def notify(*_a, **_k):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        msg = await learner.propose_from_tool(
+            slug="no-such-skill",
+            title="x",
+            description="d",
+            rationale="r",
+            is_update=True,
+            draft_markdown="# New\n",
+            memory=memory,
+            recipient="+1",
+        )
+        assert msg.startswith("Error:")
+        assert "skill_propose" in msg
+        memory.close()
+
+    async def test_update_requires_draft(self, tmp_path):
+        async def notify(*_a, **_k):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        (tmp_path / "skills").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "purge-queue-samples.md").write_text("# old\n", encoding="utf-8")
+        msg = await learner.propose_from_tool(
+            slug="purge-queue-samples",
+            title="x",
+            description="d",
+            rationale="r",
+            is_update=True,
+            draft_markdown="  ",
+            memory=_make_memory(tmp_path),
+            recipient="+1",
+        )
+        assert "draft_markdown" in msg
+
+    async def test_update_stages_pending_slug_and_draft(self, tmp_path):
+        sent: list[str] = []
+
+        async def notify(path, slug, title, desc, rationale, expires_at):
+            sent.append(slug)
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        skills = tmp_path / "skills"
+        skills.mkdir(parents=True, exist_ok=True)
+        (skills / "purge-queue-samples.md").write_text("# old body\n", encoding="utf-8")
+
+        draft = "---\nname: purge-queue-samples\nversion: \"1.1.0\"\n---\n\n# Purge\n\nUse statusMessages.\n"
+        msg = await learner.propose_from_tool(
+            slug="purge-queue-samples",
+            title="Purge Queue Samples",
+            description="Fix sample detection",
+            rationale="statusMessages not quality.name",
+            is_update=True,
+            draft_markdown=draft,
+            session_id="sess-1",
+            memory=memory,
+            recipient="+1",
+        )
+        pending = pending_slug_for_skill("purge-queue-samples", is_update=True)
+        assert pending == "skill-upd-purge-queue-samples"
+        assert pending in msg
+        assert sent == [pending]
+        row = memory.get_pending_approval(pending)
+        assert row is not None
+        assert row.status == "pending"
+        assert row.kind == SKILL_UPDATE_KIND
+        proposal = json.loads(Path(row.proposal_path).read_text(encoding="utf-8"))
+        assert proposal["slug"] == "purge-queue-samples"
+        assert proposal["is_update"] is True
+        assert "statusMessages" in proposal["draft_markdown"]
+        assert "# old body" in proposal["previous_markdown"]
+        assert not (skills / "purge-queue-samples.md").read_text(encoding="utf-8").startswith("---")
+        memory.close()
+
+    async def test_approve_update_writes_draft_without_llm(self, tmp_path):
+        async def notify(*_a, **_k):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        skills = tmp_path / "skills"
+        skills.mkdir(parents=True, exist_ok=True)
+        (skills / "purge-queue-empty.md").write_text("# old\n", encoding="utf-8")
+        draft = "# Purge queue empty\n\nGate on trackedDownloadState.\n"
+        await learner.propose_from_tool(
+            slug="purge-queue-empty",
+            title="Purge Queue Empty",
+            description="Fix importPending gate",
+            rationale="status vs trackedDownloadState",
+            is_update=True,
+            draft_markdown=draft,
+            memory=memory,
+            recipient="+1",
+        )
+        llm = MagicMock()
+        llm.chat = AsyncMock()
+        init_skill_decision_runtime(learner=learner, memory=memory, llm=llm)
+        applied = await handle_skill_decision("skill-upd-purge-queue-empty", approved=True)
+        assert applied is True
+        llm.chat.assert_not_called()
+        written = (skills / "purge-queue-empty.md").read_text(encoding="utf-8")
+        assert "trackedDownloadState" in written
+        assert "name: purge-queue-empty" in written
+        memory.close()
+
+    async def test_create_from_tool_with_draft(self, tmp_path):
+        async def notify(*_a, **_k):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        draft = "# Verify live state\n\nQuery this turn.\n"
+        msg = await learner.propose_from_tool(
+            slug="verify-live-state-before-asserting",
+            title="Verify Live State",
+            description="No stale queue claims",
+            rationale="Hallucinated empty queue",
+            is_update=False,
+            draft_markdown=draft,
+            memory=memory,
+            recipient="+1",
+        )
+        assert "verify-live-state-before-asserting" in msg
+        assert "Error" not in msg
+        row = memory.get_pending_approval("verify-live-state-before-asserting")
+        assert row is not None
+        assert row.kind == "skill_proposal"
+        llm = MagicMock()
+        llm.chat = AsyncMock()
+        init_skill_decision_runtime(learner=learner, memory=memory, llm=llm)
+        await handle_skill_decision("verify-live-state-before-asserting", approved=True)
+        llm.chat.assert_not_called()
+        body = (tmp_path / "skills" / "verify-live-state-before-asserting.md").read_text(
+            encoding="utf-8"
+        )
+        assert "Query this turn" in body
+        memory.close()
+

@@ -164,8 +164,9 @@ async def _cli_skill_propose_callback(
     """
     from datetime import datetime, timezone
     expires_str = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(timespec="minutes")
+    kind_label = "update an existing skill" if slug.startswith("skill-upd-") else "build a new skill"
     print(
-        "\n[skill proposal] The agent would like to build a new skill:\n"
+        f"\n[skill proposal] The agent would like to {kind_label}:\n"
         f"  Slug:        {slug}\n"
         f"  Title:       {title}\n"
         f"  Description: {description}\n"

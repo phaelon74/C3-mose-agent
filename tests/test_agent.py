@@ -27,6 +27,8 @@ class TestSystemPrompt:
         assert "write_file" in prompt
         assert "pending_approvals_list" in prompt
         assert "skill_proposal_get" in prompt
+        assert "skill_propose" in prompt
+        assert "skill_propose_update" in prompt
 
     def test_pending_approvals_block_in_prompt(self, tmp_path):
         mem = MemoryManager(MemoryConfig(

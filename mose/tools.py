@@ -122,6 +122,11 @@ _get_task_scheduler: Callable[[], Any | None] | None = None
 _playbook_memory: Any | None = None
 _playbook_config: Any | None = None
 
+# Skill proposals — set by init_skill_tool_context() at startup
+_skill_learner: Any | None = None
+_skill_memory: Any | None = None
+_skill_config: Any | None = None
+
 _scheduled_exec_ctx: ContextVar[dict[str, Any] | None] = ContextVar(
     "scheduled_exec_ctx", default=None
 )
@@ -211,6 +216,18 @@ def init_playbook_tool_context(
     global _playbook_memory, _playbook_config
     _playbook_memory = memory
     _playbook_config = config
+
+
+def init_skill_tool_context(
+    *,
+    learner: Any,
+    memory: Any,
+    config: Any,
+) -> None:
+    global _skill_learner, _skill_memory, _skill_config
+    _skill_learner = learner
+    _skill_memory = memory
+    _skill_config = config
 
 
 def _open_scheduled_task_memory() -> Any | None:
@@ -1105,6 +1122,79 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "skill_propose",
+            "description": (
+                "Stage a NEW production skill for admin approval. Writes pending JSON only — "
+                "does not install skills/{slug}.md. Never use write_file for production skills "
+                "(workspace copies are not live). Pass draft_markdown with the full Markdown "
+                "body you would have written. Admin replies approve <slug> on Signal."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Kebab-case skill slug (filename without .md).",
+                    },
+                    "title": {"type": "string", "description": "Short title."},
+                    "description": {
+                        "type": "string",
+                        "description": "One-line summary for the approval prompt.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this is reusable and when to use it.",
+                    },
+                    "draft_markdown": {
+                        "type": "string",
+                        "description": (
+                            "Full skill Markdown body (YAML frontmatter optional). "
+                            "Staged in the proposal; used as-is on approve instead of an LLM rewrite."
+                        ),
+                    },
+                },
+                "required": ["slug", "description", "rationale"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_propose_update",
+            "description": (
+                "Stage an UPDATE to an EXISTING production skill for admin approval. "
+                "Use this when the slug already exists under skills/ — skill_propose will refuse. "
+                "Requires draft_markdown (the full revised file). Pending slug is skill-upd-<slug>. "
+                "Never use write_file as the install step."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_slug": {
+                        "type": "string",
+                        "description": "Existing skill slug to revise (kebab-case).",
+                    },
+                    "title": {"type": "string", "description": "Short title (optional)."},
+                    "description": {
+                        "type": "string",
+                        "description": "One-line summary of the change.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "What was wrong and what this revision fixes.",
+                    },
+                    "draft_markdown": {
+                        "type": "string",
+                        "description": "Full revised skill Markdown. Required. Used as-is on approve.",
+                    },
+                },
+                "required": ["target_slug", "description", "rationale", "draft_markdown"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "pending_approvals_list",
             "description": (
                 "List proposals awaiting human admin approval (skill, tracker, scheduled task, playbook). "
@@ -1117,7 +1207,7 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     "kind": {
                         "type": "string",
                         "description": (
-                            "Optional filter: skill_proposal, tracker_proposal, tracker_deletion, "
+                            "Optional filter: skill_proposal, skill_update, tracker_proposal, tracker_deletion, "
                             "scheduled_task_proposal, scheduled_task_update, scheduled_task_deletion, "
                             "playbook_proposal, playbook_update, playbook_deletion, playbook_run_proposal."
                         ),
@@ -2754,6 +2844,7 @@ async def _tool_playbook_run_propose(args: dict, **kwargs) -> str:
 
 _APPROVAL_KINDS = frozenset({
     "skill_proposal",
+    "skill_update",
     "tracker_proposal",
     "tracker_deletion",
     "scheduled_task_proposal",
@@ -2768,7 +2859,7 @@ _APPROVAL_KINDS = frozenset({
 
 def _get_approvals_memory() -> Any | None:
     """Shared MemoryManager used by tracker, scheduled-task, and playbook subsystems."""
-    return _tracker_memory or _scheduled_task_memory or _playbook_memory
+    return _tracker_memory or _scheduled_task_memory or _playbook_memory or _skill_memory
 
 
 def _format_approval_timestamp(ts: float) -> str:
@@ -2795,7 +2886,7 @@ def _approval_row_summary(row: Any, *, include_payload: bool = False) -> dict[st
         rationale = payload.get("rationale")
         if rationale:
             item["rationale"] = str(rationale)[:500]
-        if row.kind == "skill_proposal" and row.proposal_path:
+        if row.kind in ("skill_proposal", "skill_update") and row.proposal_path:
             try:
                 proposal_file = Path(row.proposal_path)
                 if proposal_file.is_file():
@@ -2832,7 +2923,7 @@ async def _tool_skill_proposal_get(args: dict, **kwargs) -> str:
     row = memory.get_pending_approval(slug)
     if row is None or row.status != "pending":
         return f"Error: no pending skill proposal found for '{slug}'."
-    if row.kind != "skill_proposal":
+    if row.kind not in ("skill_proposal", "skill_update"):
         return (
             f"Error: '{slug}' is a pending {row.kind}, not a skill proposal. "
             "Use pending_approvals_list."
@@ -2847,6 +2938,9 @@ async def _tool_skill_proposal_get(args: dict, **kwargs) -> str:
         "rationale": str(payload.get("rationale") or ""),
         "expires_at": _format_approval_timestamp(row.expires_at),
         "proposal_path": row.proposal_path or "",
+        "target_slug": str(payload.get("target_slug") or ""),
+        "is_update": bool(payload.get("is_update")),
+        "has_draft": bool(payload.get("has_draft")),
     }
     if row.proposal_path:
         try:
@@ -2856,9 +2950,56 @@ async def _tool_skill_proposal_get(args: dict, **kwargs) -> str:
                 trace = data.get("tool_trace")
                 if isinstance(trace, list):
                     result["tool_trace_count"] = len(trace)
+                draft = str(data.get("draft_markdown") or "")
+                if draft:
+                    result["has_draft"] = True
+                    result["draft_chars"] = len(draft)
+                    result["draft_preview"] = draft[:400]
         except (OSError, json.JSONDecodeError, TypeError) as e:
             result["file_read_error"] = str(e)
     return json.dumps(result, indent=2)
+
+
+async def _skill_propose_common(
+    args: dict,
+    *,
+    is_update: bool,
+    context: str = "",
+    session_id: str = "",
+    **_kwargs: Any,
+) -> str:
+    if _skill_learner is None or _skill_memory is None:
+        return "Error: skill proposal subsystem not initialized."
+    if is_update:
+        slug = str(args.get("target_slug") or args.get("slug") or "").strip()
+    else:
+        slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required." if not is_update else "Error: target_slug is required."
+    recipient = ""
+    if _skill_config is not None:
+        recipient = str(getattr(_skill_config.signal, "admin_group_id", "") or "").strip()
+    recipient = recipient or "cli"
+    return await _skill_learner.propose_from_tool(
+        slug=slug,
+        title=str(args.get("title") or ""),
+        description=str(args.get("description") or ""),
+        rationale=str(args.get("rationale") or ""),
+        is_update=is_update,
+        draft_markdown=str(args.get("draft_markdown") or ""),
+        session_id=session_id,
+        user_message=context,
+        memory=_skill_memory,
+        recipient=recipient,
+    )
+
+
+async def _tool_skill_propose(args: dict, **kwargs) -> str:
+    return await _skill_propose_common(args, is_update=False, **kwargs)
+
+
+async def _tool_skill_propose_update(args: dict, **kwargs) -> str:
+    return await _skill_propose_common(args, is_update=True, **kwargs)
 
 
 # --- Registry ---
@@ -2896,6 +3037,8 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "playbook_delete_propose": _tool_playbook_delete_propose,
     "playbook_list": _tool_playbook_list,
     "playbook_run_propose": _tool_playbook_run_propose,
+    "skill_propose": _tool_skill_propose,
+    "skill_propose_update": _tool_skill_propose_update,
     "pending_approvals_list": _tool_pending_approvals_list,
     "skill_proposal_get": _tool_skill_proposal_get,
 }

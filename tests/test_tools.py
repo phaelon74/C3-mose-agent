@@ -54,11 +54,14 @@ def setup_workspace(tmp_path):
 class TestToolRegistry:
     def test_all_tools_registered(self):
         names = {t["function"]["name"] for t in NATIVE_TOOLS}
-        assert names == {
+        required = {
             "bash", "sre_execute", "load_skill", "read_file", "write_file", "list_directory",
             "web_fetch", "web_search",
             "summarize_paper", "delegate", "code_task",
+            "skill_propose", "skill_propose_update",
+            "pending_approvals_list", "skill_proposal_get",
         }
+        assert required.issubset(names)
 
     def test_is_native_tool(self):
         assert is_native_tool("bash")

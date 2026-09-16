@@ -157,3 +157,36 @@ class TestSkillProposalGet:
         assert result["title"] == "Queue Purge"
         assert result["rationale"] == "Safe validation pattern"
         assert result["tool_trace_count"] == 1
+
+    async def test_skill_update_kind(self, memory, tmp_path):
+        proposal_path = tmp_path / "skill-upd-purge.proposal.json"
+        proposal_path.write_text(
+            json.dumps({
+                "slug": "purge-queue-samples",
+                "is_update": True,
+                "draft_markdown": "# Revised\n\nUse statusMessages.\n",
+            }),
+            encoding="utf-8",
+        )
+        memory.save_pending_approval(
+            slug="skill-upd-purge-queue-samples",
+            kind="skill_update",
+            recipient="signal:admin",
+            proposal_path=str(proposal_path),
+            payload={
+                "title": "Update: Purge Queue Samples",
+                "description": "Fix sample flag",
+                "rationale": "Wrong field",
+                "target_slug": "purge-queue-samples",
+                "is_update": True,
+                "has_draft": True,
+            },
+            expires_at=time.time() + 3600,
+        )
+        result = json.loads(
+            await _tool_skill_proposal_get({"slug": "skill-upd-purge-queue-samples"})
+        )
+        assert result["kind"] == "skill_update"
+        assert result["target_slug"] == "purge-queue-samples"
+        assert result["has_draft"] is True
+        assert "statusMessages" in result["draft_preview"]
