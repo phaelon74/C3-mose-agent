@@ -17,6 +17,47 @@ from mose.observe import get_logger, log_event
 
 logger = get_logger("memory")
 
+
+def patch_nomic_extended_attention_mask(model: Any) -> int:
+    """Restore ``get_extended_attention_mask`` on cached nomic-bert remote modules.
+
+    Transformers 5 removed that helper from ``PreTrainedModel``. Older
+    ``nomic-bert-2048`` ``trust_remote_code`` still calls it during encode,
+    which crashes memory search and scheduled tasks.
+    """
+    try:
+        import torch
+    except ImportError:
+        return 0
+
+    def get_extended_attention_mask(self, attention_mask, input_shape, device=None, dtype=None):
+        del input_shape, device
+        if dtype is None:
+            dtype = getattr(self, "dtype", None) or attention_mask.dtype
+        if attention_mask.dim() == 3:
+            extended = attention_mask[:, None, :, :]
+        elif attention_mask.dim() == 2:
+            extended = attention_mask[:, None, None, :]
+        else:
+            raise ValueError(f"Wrong shape for attention_mask (shape {tuple(attention_mask.shape)})")
+        extended = extended.to(dtype=dtype)
+        return (1.0 - extended) * torch.finfo(dtype).min
+
+    patched = 0
+    seen: set[type] = set()
+    modules = getattr(model, "modules", None)
+    iterable = model.modules() if callable(modules) else [model]
+    for module in iterable:
+        cls = type(module)
+        if cls in seen or "NomicBert" not in cls.__name__:
+            continue
+        seen.add(cls)
+        if callable(getattr(cls, "get_extended_attention_mask", None)):
+            continue
+        cls.get_extended_attention_mask = get_extended_attention_mask
+        patched += 1
+    return patched
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY,
@@ -664,13 +705,44 @@ class MemoryManager:
         """Lazy-load the embedding model on first use."""
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
-            self._embedder = SentenceTransformer(
-                self.config.embedding_model,
-                truncate_dim=self.config.embedding_dimensions,
-                trust_remote_code=True,
-                device="cpu",
-            )
-            log_event(logger, "embedder_loaded", model=self.config.embedding_model)
+
+            kwargs = {
+                "truncate_dim": self.config.embedding_dimensions,
+                "device": "cpu",
+            }
+            try:
+                self._embedder = SentenceTransformer(
+                    self.config.embedding_model,
+                    trust_remote_code=False,
+                    **kwargs,
+                )
+                log_event(
+                    logger,
+                    "embedder_loaded",
+                    model=self.config.embedding_model,
+                    trust_remote_code=False,
+                )
+            except Exception as e:
+                log_event(
+                    logger,
+                    "embedder_native_load_failed",
+                    error=str(e)[:400],
+                    model=self.config.embedding_model,
+                )
+                self._embedder = SentenceTransformer(
+                    self.config.embedding_model,
+                    trust_remote_code=True,
+                    **kwargs,
+                )
+                log_event(
+                    logger,
+                    "embedder_loaded",
+                    model=self.config.embedding_model,
+                    trust_remote_code=True,
+                )
+            n = patch_nomic_extended_attention_mask(self._embedder)
+            if n:
+                log_event(logger, "nomic_attention_mask_patched", modules=n)
         return self._embedder
 
     def _embed(self, text: str) -> list[float]:
@@ -738,14 +810,16 @@ class MemoryManager:
         )
         mem_id = cur.lastrowid
 
-        # Store embedding
-        embedding = self._embed_document(content)
-        self.db.execute(
-            "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
-            (mem_id, json.dumps(embedding)),
-        )
-        self.db.commit()
+        try:
+            embedding = self._embed_document(content)
+            self.db.execute(
+                "INSERT INTO memories_vec (rowid, embedding) VALUES (?, ?)",
+                (mem_id, json.dumps(embedding)),
+            )
+        except Exception:
+            logger.exception("memory_embed_store_failed", extra={"mem_id": mem_id})
 
+        self.db.commit()
         log_event(logger, "memory_stored", mem_id=mem_id, memory_type=memory_type, importance=importance)
         return mem_id
 
@@ -780,7 +854,11 @@ class MemoryManager:
         except sqlite3.OperationalError:
             fts_results = []
 
-        vec_results = self._vec_search(query)
+        try:
+            vec_results = self._vec_search(query)
+        except Exception:
+            logger.exception("memory_vec_search_failed")
+            vec_results = []
 
         # RRF: score = sum(1 / (k + rank)) across methods
         k = self.config.rrf_k

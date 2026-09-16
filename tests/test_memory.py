@@ -99,6 +99,59 @@ class TestMemoryStorage:
         # France-related results should rank higher
         assert "France" in results[0].content or "French" in results[0].content
 
+    def test_search_falls_back_when_vec_fails(self, memory):
+        memory.db.execute(
+            "INSERT INTO memories (content, memory_type, importance, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("Python is a programming language", "fact", 7.0, time.time()),
+        )
+        memory.db.commit()
+
+        def boom(_query: str, limit: int = 50):
+            raise RuntimeError("NomicBertModel missing get_extended_attention_mask")
+
+        memory._vec_search = boom  # type: ignore[method-assign]
+        results = memory.search("programming")
+        assert any("Python" in r.content for r in results)
+
+
+class TestNomicAttentionMaskPatch:
+    def test_patch_adds_missing_method(self):
+        import torch
+
+        from mose.memory import patch_nomic_extended_attention_mask
+
+        class NomicBertModel:
+            pass
+
+        inst = NomicBertModel()
+
+        class Wrapper:
+            def modules(self):
+                yield inst
+
+        n = patch_nomic_extended_attention_mask(Wrapper())
+        assert n == 1
+        mask = torch.ones(1, 4)
+        out = inst.get_extended_attention_mask(mask, (1, 4))
+        assert out.shape == (1, 1, 1, 4)
+        assert torch.all(out <= 0)
+
+    def test_patch_skips_when_already_present(self):
+        from mose.memory import patch_nomic_extended_attention_mask
+
+        class NomicBertModel:
+            def get_extended_attention_mask(self, *args, **kwargs):
+                return None
+
+        inst = NomicBertModel()
+
+        class Wrapper:
+            def modules(self):
+                yield inst
+
+        assert patch_nomic_extended_attention_mask(Wrapper()) == 0
+
 
 class TestSummaries:
     def test_should_summarize(self, memory):
