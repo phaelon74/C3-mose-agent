@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -23,7 +24,9 @@ from mose.upcoming_arr import (
 )
 from mose.upcoming_store import CatalogTitle, RecommendationItem, UpcomingStore
 from mose.upcoming_tmdb import (
+    TMDB_GONE_STATUS,
     TmdbClient,
+    TmdbNotFoundError,
     apply_movie_details,
     apply_tv_details,
     catalog_years,
@@ -166,6 +169,8 @@ def in_recommendation_window(
 
 def passes_rec_filters(title: CatalogTitle, cfg: UpcomingConfig) -> bool:
     if title.adult:
+        return False
+    if (title.status or "").strip().lower() == TMDB_GONE_STATUS:
         return False
     if (title.popularity or 0) < cfg.min_popularity:
         return False
@@ -345,18 +350,24 @@ def render_markdown(
 
 
 def needs_details(existing: CatalogTitle | None, *, now: float, force: bool = False) -> bool:
-    if force:
-        return True
+    """Whether to call TMDB /movie or /tv details for this catalog row.
+
+    Missing US dates or tvdb_id used to force a fetch *every* run. Combined with
+    TMDB 404s (deleted IDs) that never set ``details_fetched_at``, the daily
+    sync looked hung: one rate-limited GET every ~0.28s plus a full traceback.
+    Honor the 7-day stale window; ``force`` still refreshes trending rows.
+    """
     if existing is None:
         return True
     fetched = existing.details_fetched_at or 0
-    if now - fetched > DETAILS_STALE_SECONDS:
+    gone = (existing.status or "").strip().lower() == TMDB_GONE_STATUS
+    if gone and not force:
+        return (now - fetched) > DETAILS_STALE_SECONDS if fetched else True
+    if force:
         return True
-    if existing.media_type == "movie" and not existing.us_theatrical and not existing.us_digital:
+    if fetched <= 0:
         return True
-    if existing.media_type == "tv" and existing.tvdb_id is None:
-        return True
-    return False
+    return (now - fetched) > DETAILS_STALE_SECONDS
 
 
 async def _discover_all_pages(
@@ -427,11 +438,21 @@ async def _refresh_title_details(
     now: float,
     trending_force: set[tuple[str, int]],
 ) -> int:
+    titles = store.list_titles()
+    due = [
+        t for t in titles
+        if needs_details(t, now=now, force=(t.media_type, t.tmdb_id) in trending_force)
+    ]
+    log_event(
+        logger,
+        "tmdb_details_begin",
+        catalog=len(titles),
+        due=len(due),
+    )
     refreshed = 0
-    for t in store.list_titles():
-        force = (t.media_type, t.tmdb_id) in trending_force
-        if not needs_details(t, now=now, force=force):
-            continue
+    gone = 0
+    failed = 0
+    for t in due:
         try:
             if t.media_type == "movie":
                 details = await client.movie_details(t.tmdb_id)
@@ -485,8 +506,41 @@ async def _refresh_title_details(
                         [s for s in seasons if s.get("season_number") is not None],
                     )
             refreshed += 1
+            if refreshed % 25 == 0:
+                log_event(
+                    logger,
+                    "tmdb_details_progress",
+                    refreshed=refreshed,
+                    gone=gone,
+                    failed=failed,
+                    due=len(due),
+                )
+        except TmdbNotFoundError:
+            gone += 1
+            log_event(
+                logger,
+                "tmdb_details_gone",
+                media=t.media_type,
+                tmdb_id=t.tmdb_id,
+                title=(t.title or "")[:80],
+            )
+            store.upsert_title(
+                replace(t, status=TMDB_GONE_STATUS, details_fetched_at=now, updated_at=now)
+            )
         except Exception:
-            logger.exception("tmdb_details_failed", extra={"media": t.media_type, "tmdb_id": t.tmdb_id})
+            failed += 1
+            logger.exception(
+                "tmdb_details_failed",
+                extra={"media": t.media_type, "tmdb_id": t.tmdb_id},
+            )
+    log_event(
+        logger,
+        "tmdb_details_done",
+        refreshed=refreshed,
+        gone=gone,
+        failed=failed,
+        due=len(due),
+    )
     return refreshed
 
 

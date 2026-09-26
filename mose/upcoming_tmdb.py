@@ -14,6 +14,23 @@ from mose.observe import get_logger, log_event
 logger = get_logger("upcoming_tmdb")
 
 TMDB_API = "https://api.themoviedb.org/3"
+TMDB_GONE_STATUS = "tmdb_gone"
+
+
+class TmdbHttpError(Exception):
+    """TMDB HTTP error. ``path`` is the API path only — never include the API key."""
+
+    def __init__(self, path: str, status: int) -> None:
+        self.path = path
+        self.status = int(status)
+        super().__init__(f"TMDB HTTP {self.status} for {path}")
+
+
+class TmdbNotFoundError(TmdbHttpError):
+    """Title was deleted, merged, or is no longer visible on TMDB."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path, 404)
 ANIMATION_GENRE_ID = 16
 # TMDB movie release types: 1 Premiere, 2 Theatrical limited, 3 Theatrical, 4 Digital, 5 Physical, 6 TV
 THEATRICAL_TYPES = frozenset({2, 3})
@@ -416,7 +433,10 @@ class TmdbClient:
                         await asyncio.sleep(backoff)
                         backoff = min(30.0, backoff * 2)
                         continue
-                    resp.raise_for_status()
+                    if resp.status == 404:
+                        raise TmdbNotFoundError(path)
+                    if resp.status >= 400:
+                        raise TmdbHttpError(path, resp.status)
                     return await resp.json()
         raise RuntimeError(f"TMDB request failed after retries: {path}")
 

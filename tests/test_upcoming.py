@@ -14,7 +14,9 @@ from mose.mcp_write_policy import classify_mcp_tool
 from mose.memory import MemoryConfig, MemoryManager
 from mose.tools import scheduled_execution_bypasses_approval
 from mose.upcoming import (
+    DETAILS_STALE_SECONDS,
     UPCOMING_APPROVAL_KIND,
+    _refresh_title_details,
     build_recommendation,
     canonical_upcoming_slug,
     compute_score,
@@ -22,6 +24,7 @@ from mose.upcoming import (
     format_score_breakdown,
     in_recommendation_window,
     iso_week_slug,
+    needs_details,
     parse_line_numbers,
     passes_rec_filters,
     render_markdown,
@@ -40,6 +43,9 @@ from mose.upcoming_arr import (
 from mose.upcoming_decision import format_upcoming_recovery_message, handle_upcoming_decision, init_upcoming_decision_runtime
 from mose.upcoming_store import CatalogTitle, LibraryMovie, LibrarySeries, RecommendationItem, UpcomingStore
 from mose.upcoming_tmdb import (
+    TMDB_GONE_STATUS,
+    TmdbClient,
+    TmdbNotFoundError,
     apply_tv_details,
     compute_next_season,
     extract_us_release_dates,
@@ -198,6 +204,108 @@ class TestTmdbParsers:
         merged = {"tmdb_id": 9, "title": "X"}
         out = await fill_missing_tvdb_id(_Client(), merged)  # type: ignore[arg-type]
         assert out["tvdb_id"] == 321
+
+
+class TestNeedsDetails:
+    def test_tv_without_tvdb_does_not_refetch_every_run(self):
+        now = 1_000_000.0
+        t = _title(
+            media_type="tv",
+            kind="tv",
+            tvdb_id=None,
+            details_fetched_at=now - 60,
+            us_theatrical=None,
+            us_digital=None,
+        )
+        assert needs_details(t, now=now) is False
+
+    def test_never_fetched_still_due(self):
+        t = _title(details_fetched_at=None, us_theatrical=None, us_digital=None)
+        assert needs_details(t, now=1_000.0) is True
+
+    def test_gone_recent_skips_unless_stale_or_forced(self):
+        now = 1_000_000.0
+        t = _title(
+            media_type="tv",
+            kind="tv",
+            status=TMDB_GONE_STATUS,
+            tvdb_id=None,
+            details_fetched_at=now - 60,
+        )
+        assert needs_details(t, now=now) is False
+        assert needs_details(t, now=now, force=True) is True
+        stale = _title(
+            media_type="tv",
+            kind="tv",
+            status=TMDB_GONE_STATUS,
+            details_fetched_at=now - DETAILS_STALE_SECONDS - 1,
+        )
+        assert needs_details(stale, now=now) is True
+
+    def test_gone_excluded_from_recommendations(self):
+        t = _title(status=TMDB_GONE_STATUS, popularity=50, vote_count=50)
+        assert passes_rec_filters(t, _cfg()) is False
+
+
+class TestRefreshGone:
+    @pytest.mark.asyncio
+    async def test_404_marks_gone_without_raising(self, tmp_path: Path):
+        store = UpcomingStore(tmp_path / "upcoming.db")
+        store.upsert_title(_title(
+            media_type="tv",
+            tmdb_id=322275,
+            kind="tv",
+            title="Deleted Show",
+            tvdb_id=None,
+            details_fetched_at=None,
+            us_theatrical=None,
+            us_digital=None,
+        ))
+        client = MagicMock()
+        client.tv_details = AsyncMock(side_effect=TmdbNotFoundError("/tv/322275"))
+        n = await _refresh_title_details(
+            store,
+            client,
+            _cfg(),
+            today=date(2026, 9, 26),
+            catalog_start=date(2026, 1, 1),
+            catalog_end=date(2027, 12, 31),
+            now=1_000_000.0,
+            trending_force=set(),
+        )
+        assert n == 0
+        row = store.get_title("tv", 322275)
+        assert row is not None
+        assert row.status == TMDB_GONE_STATUS
+        assert row.details_fetched_at == 1_000_000.0
+        assert row.title == "Deleted Show"
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_client_404_does_not_embed_api_key(self):
+        class _Resp:
+            status = 404
+            headers: dict = {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+            def raise_for_status(self):
+                raise AssertionError("404 must not call raise_for_status")
+
+        class _Session:
+            def get(self, url, params=None):
+                assert "api_key" in (params or {})
+                return _Resp()
+
+        client = TmdbClient("secret-test-key", session=_Session(), min_interval=0)  # type: ignore[arg-type]
+        with pytest.raises(TmdbNotFoundError) as ei:
+            await client.get("/tv/322275")
+        assert "secret-test-key" not in str(ei.value)
+        assert ei.value.path == "/tv/322275"
 
 
 class TestScoringAndFilters:
