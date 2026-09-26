@@ -903,9 +903,21 @@ async def _run_upcoming_attach_test(config, path: str) -> int:
         memory = None
 
     bot = MoseSignalBot(_Dummy(), config.signal)  # type: ignore[arg-type]
+    # _reader_loop only runs while _running; start() normally sets this.
+    bot._running = True
     try:
         await bot._connect()
         bot._reader_task = asyncio.create_task(bot._reader_loop())
+        await asyncio.sleep(0)
+        if bot._reader_task.done():
+            print(
+                "Signal JSON-RPC reader exited immediately; send would hang until timeout.\n"
+                "Usual cause: mose-agent already holds the signal-cli TCP socket.\n"
+                "Do not run --upcoming-attach-test while the bot is up.\n"
+                "In the admin group: approve <slug> (e.g. approve upcoming-2026-W39).\n"
+                f"Or copy the file off the container: docker compose cp mose-agent:{p} ./"
+            )
+            return 3
         await bot._send_message(
             config.signal.admin_group_id,
             "Upcoming attach test — if you see this file, outbound attachments work.",
@@ -913,6 +925,13 @@ async def _run_upcoming_attach_test(config, path: str) -> int:
         )
         print("Sent test attachment to Signal admin group.")
         return 0
+    except TimeoutError:
+        print(
+            "Timed out waiting for signal-cli send (90s with an attachment).\n"
+            "If mose-agent is running, it owns the JSON-RPC connection — "
+            "approve the upcoming slug in Signal instead of attach-test."
+        )
+        return 4
     finally:
         await bot.close()
 
