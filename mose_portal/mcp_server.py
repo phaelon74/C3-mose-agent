@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from mose.approval_timing import APPROVAL_REQUEST_TIMEOUT_SECONDS
 from mose_portal.aggregator import PortalAggregator
 from mose_portal.rpc import CodeModeRPC
 from mose_portal.sandbox_runner import (
@@ -140,6 +141,11 @@ async def execute_impl(
         )
 
     rpc = state.rpc
+    # Weekly additions execute one mutating call per invocation. Reserve a full
+    # interactive approval window in addition to the requested execution time,
+    # and pass the same budget to both the Docker runner and the RPC deadline.
+    if (os.environ.get("MCP_PORTAL_AGENT_APPROVAL_URL") or "").strip():
+        timeout_seconds += APPROVAL_REQUEST_TIMEOUT_SECONDS
     token, fut = rpc.register_session(
         scheduled_approval_token=scheduled_approval_token,
     )

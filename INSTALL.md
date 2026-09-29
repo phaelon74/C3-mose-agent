@@ -929,6 +929,20 @@ python -m mose --upcoming-attach-test data/logs/test.md
 ```
 
 Approve in Signal: `approve upcoming-YYYY-Www` or `approve upcoming-YYYY-Www 1,4,7`.
+Selected titles are added with monitoring and search-on-add explicitly enabled
+(Radarr movie search; Sonarr missing-episode search for the added series).
+The Code Mode add calls retain their admin approval prompts, with search flags
+included in the arguments. Each selected item is processed sequentially; its
+combined add-and-search prompt allows **60 minutes** to reply in the admin group
+with `y`, `yes`, or `approve`. There is no separate search-only prompt. Silence
+still denies execution. This 60-minute window also applies to other interactive
+Signal MCP/SRE approvals; proposal expiry is unchanged.
+The portal reserves an approval window in addition to Code Mode execution time.
+Rebuild and recreate both `mose-agent` and `mose-mcp-portal` for this change.
+Denied, timed-out, or failed Code Mode calls are
+reported as failures and are never retried through direct HTTP. The HTTP path
+is used only when no Code Mode executor is configured, after list approval.
+Search requested does not mean a download was found or completed.
 
 Resend an existing Markdown report from the Signal admin group:
 `resend upcoming latest` or `resend upcoming upcoming-YYYY-Www`.

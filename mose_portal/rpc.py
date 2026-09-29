@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
+from mose.approval_timing import APPROVAL_REQUEST_TIMEOUT_SECONDS
 from mose.mcp_write_policy import classify_mcp_tool
 from mose_portal.codegen import generate_mcp_dts, sanitize_server_ts
 
@@ -26,7 +27,7 @@ log = logging.getLogger("mose_portal.rpc")
 
 MAX_WS_TEXT = 512_000
 MAX_CALL_RESULT = 256_000
-_APPROVAL_HTTP_TIMEOUT = 125.0
+_APPROVAL_HTTP_TIMEOUT = float(APPROVAL_REQUEST_TIMEOUT_SECONDS)
 
 
 def _approval_bridge_url() -> str:

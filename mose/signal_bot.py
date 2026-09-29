@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import quote
 
 from mose.agent import Agent
+from mose.approval_timing import ADMIN_APPROVAL_TIMEOUT_SECONDS
 from mose.config import SignalConfig
 from mose.mcp_write_policy import use_tool_needs_approval
 from mose.observe import get_logger, log_event
@@ -651,7 +652,7 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
         tokens = text.strip().split()
         line_spec = ",".join(tokens[2:]) if approved and len(tokens) >= 3 else None
         if approved:
-            await bot._send_message(admin_gid, f"Upcoming list '{slug}' approved — adding now.")
+            await bot._send_message(admin_gid, f"Upcoming list '{slug}' approved — requesting add and search for the selected titles.")
         applied = await handle_upcoming_decision(slug, approved=approved, line_spec=line_spec)
         if not applied:
             await bot._send_message(
@@ -688,7 +689,7 @@ def set_approval_context(incoming_group_id: str, bot: "MoseSignalBot") -> None:
 
 
 async def _signal_approval_callback(command: str, reason: str, target_system: str) -> bool:
-    """Prompt admin group for approval. Waits for reply (y/yes/approve) within 60s."""
+    """Prompt admin group for approval, allowing 60 minutes for a reply."""
     ctx = _approval_ctx.get() or _last_approval_ctx
     if not ctx:
         log_event(logger, "signal_approval_no_context", target_system=target_system)
@@ -710,7 +711,7 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
         f"System: {target_system}\n"
         f"Reason: {reason}\n"
         f"Command: {command[:500]}{'...' if len(command) > 500 else ''}\n\n"
-        f"Reply with 'y', 'yes', or 'approve' within 60 seconds."
+        f"Reply with 'y', 'yes', or 'approve' within {ADMIN_APPROVAL_TIMEOUT_SECONDS // 60} minutes."
     )
     await bot._send_message(admin_gid, prompt)
 
@@ -727,7 +728,7 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
     bot._pending_approval[admin_gid] = future
 
     try:
-        approved = await asyncio.wait_for(future, 60)
+        approved = await asyncio.wait_for(future, ADMIN_APPROVAL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         await bot._send_message(admin_gid, "Approval timed out. Execution denied.")
         approved = False

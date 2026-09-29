@@ -307,6 +307,7 @@ def render_markdown(
         f"Approve all: `approve {slug}`",
         f"Approve subset: `approve {slug} 1,4,7`",
         f"Reject: `reject {slug}`",
+        "Approval requests adding and searching for the selected titles only.",
         "",
     ]
     sections = (
@@ -782,6 +783,7 @@ def format_recommendation_summary(
     )
     if approval_available:
         return summary + (
+            "\nSelected titles will be added and searched."
             f"\nReply `approve {slug}` or `approve {slug} 1,4,7` or `reject {slug}`."
         )
     return summary + f"\nStatus: {status}. No active approval is available."
@@ -858,10 +860,13 @@ def codemode_add_movie(item: RecommendationItem, arr_cfg: dict[str, Any]) -> str
     return (
         "const r = await mcp.plex_stack_automation.radarr_add_movie({\n"
         f"  tmdbId: {int(item.tmdb_id)},\n"
+        f"  title: {json_dumps(item.title)},\n"
         f"  qualityProfileId: {qid},\n"
         f"  rootFolderPath: {root},\n"
-        "  monitored: true\n"
+        "  monitored: true,\n"
+        "  searchForMovie: true\n"
         "});\n"
+        "if (r?.success !== true || !r.movie?.id) throw new Error(r?.error || 'Radarr did not confirm add and search');\n"
         "console.log(JSON.stringify(r));\n"
     )
 
@@ -884,12 +889,16 @@ def codemode_add_series(item: RecommendationItem, arr_cfg: dict[str, Any]) -> st
         "const row = Array.isArray(lookup) ? lookup[0] : lookup;\n"
         "const r = await mcp.plex_stack_automation.sonarr_add_series({\n"
         f"  tvdbId: {int(item.tvdb_id or 0)},\n"
+        f"  title: {json_dumps(item.title)},\n"
         f"  qualityProfileId: {qid},\n"
         f"  rootFolderPath: {json_dumps(root)},\n"
         f"  seriesType: {json_dumps(stype)},\n"
-        "  monitored: true\n"
+        "  monitored: true,\n"
+        "  monitorType: 'all',\n"
+        "  searchForMissingEpisodes: true\n"
         "});\n"
-        "console.log(JSON.stringify({lookup: row, add: r}));\n"
+        "if (r?.success !== true || !r.series?.id) throw new Error(r?.error || 'Sonarr did not confirm add and search');\n"
+        "console.log(JSON.stringify(r));\n"
     )
 
 
@@ -946,27 +955,37 @@ async def execute_upcoming_adds(
         for it in items:
             try:
                 if execute_codemode is not None:
-                    try:
-                        code = (
-                            codemode_add_movie(it, arr_cfg)
-                            if it.kind == "movie"
-                            else codemode_add_series(it, arr_cfg)
-                        )
-                        text, is_err = await execute_codemode(code, 60)
-                        if is_err:
-                            raise RuntimeError(text[:1500])
-                        results.append(
-                            {"line": it.line_number, "title": it.title, "ok": True, "detail": text[:500]}
-                        )
-                        continue
-                    except Exception:
-                        logger.exception(
-                            "upcoming_codemode_add_failed_fallback_http",
-                            extra={"line": it.line_number},
-                        )
+                    code = (
+                        codemode_add_movie(it, arr_cfg)
+                        if it.kind == "movie"
+                        else codemode_add_series(it, arr_cfg)
+                    )
+                    # Leave time for the existing per-item admin approval prompt.
+                    text, is_err = await execute_codemode(code, 120)
+                    if is_err:
+                        raise RuntimeError(text[:1500])
+                    # Code Mode reports runtime errors in its JSON envelope even
+                    # when the outer MCP call itself is not marked as an error.
+                    execution = json.loads(text)
+                    if not isinstance(execution, dict) or execution.get("errors"):
+                        raise RuntimeError(f"Add/search not confirmed: {text[:1500]}")
+                    added = json.loads(execution.get("stdout") or "{}")
+                    resource = "movie" if it.kind == "movie" else "series"
+                    if not isinstance(added, dict) or added.get("success") is not True or not (
+                        isinstance(added.get(resource), dict) and added[resource].get("id")
+                    ):
+                        raise RuntimeError(f"Add/search not confirmed: {str(added)[:1500]}")
+                    results.append({
+                        "line": it.line_number, "title": it.title, "ok": True,
+                        "detail": "Added with monitoring enabled; search requested.",
+                    })
+                    continue
+                # HTTP is only used when no Code Mode executor is configured.
+                # Never retry a denied, timed-out, or failed MCP mutation via HTTP.
                 fn = add_http or add_item_http
                 detail = await fn(it, cfg, arr_cfg)
-                results.append({"line": it.line_number, "title": it.title, "ok": True, "detail": detail[:500]})
+                results.append({"line": it.line_number, "title": it.title, "ok": True,
+                                "detail": "Added with monitoring enabled; search requested. " + detail[:400]})
             except Exception as e:
                 logger.exception("upcoming_add_item_failed", extra={"line": it.line_number, "title": it.title})
                 results.append({"line": it.line_number, "title": it.title, "ok": False, "detail": str(e)[:500]})
