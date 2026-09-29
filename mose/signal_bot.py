@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import mimetypes
+import re
+import time
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from mose.agent import Agent
 from mose.config import SignalConfig
@@ -215,23 +221,69 @@ async def _signal_skill_review_notify(report_path: str, summary: str) -> None:
 
 
 async def _signal_upcoming_notify(summary: str, report_path: str, attachment_path: str | None = None) -> None:
-    """Weekly upcoming-media report: summary plus Markdown attachment (fallback: path)."""
+    """Deliver the report, propagating attachment failures to the weekly job."""
     bot = _active_bot
     if bot is None:
-        return
+        raise RuntimeError("Signal bot is unavailable for upcoming report delivery")
     admin_gid = (bot.config.admin_group_id or "").strip()
     if not admin_gid:
-        return
+        raise RuntimeError("Signal admin group is not configured")
     body = f"Upcoming media report\n\n{summary}"
-    att = [attachment_path] if attachment_path else None
+    att = [attachment_path or report_path]
     try:
         await bot._send_message(admin_gid, body, attachments=att)
     except Exception:
         logger.exception("signal_upcoming_attach_failed", extra={"path": report_path})
-        await bot._send_message(
-            admin_gid,
-            f"{body}\n\nFull report on disk: {report_path}",
-        )
+        slug = Path(report_path).stem
+        try:
+            await bot._send_message(
+                admin_gid,
+                f"Attachment delivery failed for {slug}. The report is saved.\n"
+                f"Retry with `resend upcoming {slug}`.",
+            )
+        except Exception:
+            logger.exception("signal_upcoming_failure_notice_failed")
+        raise
+
+
+async def _handle_upcoming_resend(bot: "MoseSignalBot", group_id: str, content: str) -> bool:
+    tokens = content.strip().split()
+    if len(tokens) < 2 or [t.lower() for t in tokens[:2]] != ["resend", "upcoming"]:
+        return False
+    if group_id != (bot.config.admin_group_id or "").strip():
+        return True
+    from mose.upcoming import canonical_upcoming_slug, format_recommendation_summary
+
+    if len(tokens) != 3 or (
+        tokens[2].lower() != "latest"
+        and not re.fullmatch(r"upcoming-\d{4}-w\d{1,2}", tokens[2], re.IGNORECASE)
+    ):
+        await bot._send_message(group_id, "Usage: resend upcoming latest OR resend upcoming upcoming-YYYY-Www")
+        return True
+    store = bot.agent.upcoming_store
+    run = (store.latest_recommendation_run() if tokens[2].lower() == "latest"
+           else store.get_recommendation_run(canonical_upcoming_slug(tokens[2])))
+    if run is None:
+        await bot._send_message(group_id, "No saved recommendation report found.")
+        return True
+    slug = run["slug"]
+    approval = bot.agent.memory.get_pending_approval(slug)
+    available = bool(
+        approval and approval.kind == "upcoming_add" and approval.recipient == group_id
+        and approval.status == "pending" and approval.expires_at > time.time()
+        and approval.payload.get("recommendation_run_id") == run["id"]
+    )
+    status = run["status"]
+    if approval and approval.status == "pending" and approval.expires_at <= time.time():
+        status = "expired"
+    summary = format_recommendation_summary(slug, run["counts"], approval_available=available, status=status)
+    try:
+        await bot._send_message(group_id, f"Upcoming media report\n\n{summary}", attachments=[run["report_path"]])
+    except Exception as exc:
+        logger.exception("signal_upcoming_resend_failed", extra={"slug": slug, "path": run["report_path"]})
+        reason = "The saved file is missing or unreadable." if isinstance(exc, OSError) else "Signal did not confirm attachment delivery."
+        await bot._send_message(group_id, f"Could not resend {slug}. {reason}\nRetry with `resend upcoming {slug}`.")
+    return True
 
 
 async def _signal_upcoming_failure(kind: str, message: str, _unused: str | None = None) -> None:
@@ -879,19 +931,19 @@ class MoseSignalBot:
     ) -> None:
         """Send a message to a Signal group via JSON-RPC (groupId only).
 
-        Optional ``attachments`` are absolute file paths (signal-cli ``send``
-        ``attachments`` array). Attached only on the first chunk.
+        Optional ``attachments`` are local file paths, encoded as data URIs so
+        the daemon need not share our filesystem. Attached on the first chunk.
         """
         gid = (group_id or "").strip()
         if not gid:
             return
-        from pathlib import Path
-
         abs_att: list[str] = []
         for raw in attachments or []:
             p = Path(str(raw)).expanduser()
-            if p.is_file():
-                abs_att.append(str(p.resolve()))
+            data = p.read_bytes()
+            mime = "text/markdown" if p.suffix.lower() == ".md" else (mimetypes.guess_type(p.name)[0] or "application/octet-stream")
+            encoded = base64.b64encode(data).decode("ascii")
+            abs_att.append(f"data:{mime};filename={quote(p.name, safe='')};base64,{encoded}")
         chunks = _split_message(text)
         for i, chunk in enumerate(chunks):
             params: dict[str, Any] = {"groupId": gid, "message": chunk}
@@ -959,6 +1011,9 @@ class MoseSignalBot:
 
         if group_id not in (eng, adm):
             self._log_unknown_channel_once(group_id)
+            return
+
+        if await _handle_upcoming_resend(self, group_id, content):
             return
 
         if group_id == adm:

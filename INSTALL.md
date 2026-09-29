@@ -765,15 +765,17 @@ The signal-cli daemon must receive attachments (do not run JSON-RPC mode with
 
 **Outbound attachments:** Mose can attach a file on `send` (used by the weekly
 upcoming-media report). signal-cli JSON-RPC `send` params include
-`attachments: ["/absolute/path/to/file.md"]` on the first message chunk.
+an `attachments` array of base64 data URIs on the first message chunk.
+Mose reads the local file and sends its bytes and filename; the host daemon
+does not need access to the container filesystem. Admin approval rules are unchanged.
 Verify with:
 
 ```bash
 python -m mose --upcoming-attach-test data/logs/test.md
 ```
 
-If send fails, Mose falls back to a summary plus the on-disk path (same as
-skill-review reports). Requires signal-cli 0.13+ (0.14.x as documented above).
+If a weekly attachment fails, Mose reports the delivery failure and preserves
+the saved report for resending. Use signal-cli 0.14.x as documented above.
 
 ### E.5 Wire the agent
 
@@ -927,6 +929,12 @@ python -m mose --upcoming-attach-test data/logs/test.md
 ```
 
 Approve in Signal: `approve upcoming-YYYY-Www` or `approve upcoming-YYYY-Www 1,4,7`.
+
+Resend an existing Markdown report from the Signal admin group:
+`resend upcoming latest` or `resend upcoming upcoming-YYYY-Www`.
+This uses the running bot and the saved file. It does not regenerate the report,
+add media, approve anything, or extend approval expiry. Only active approvals
+include approve/reject instructions in the resend message.
 
 Optional systemd catch-up: `mose-upcoming-sync.timer` (daily `--upcoming-sync`).
 

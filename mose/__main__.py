@@ -912,9 +912,9 @@ async def _run_upcoming_attach_test(config, path: str) -> int:
         if bot._reader_task.done():
             print(
                 "Signal JSON-RPC reader exited immediately; send would hang until timeout.\n"
-                "Usual cause: mose-agent already holds the signal-cli TCP socket.\n"
-                "Do not run --upcoming-attach-test while the bot is up.\n"
-                "In the admin group: approve <slug> (e.g. approve upcoming-2026-W39).\n"
+                "Check signal-cli connectivity and daemon logs.\n"
+                "To resend a saved report using the running bot, send in the admin group:\n"
+                "resend upcoming latest (or resend upcoming upcoming-2026-W39).\n"
                 f"Or copy the file off the container: docker compose cp mose-agent:{p} ./"
             )
             return 3
@@ -928,8 +928,8 @@ async def _run_upcoming_attach_test(config, path: str) -> int:
     except TimeoutError:
         print(
             "Timed out waiting for signal-cli send (90s with an attachment).\n"
-            "If mose-agent is running, it owns the JSON-RPC connection — "
-            "approve the upcoming slug in Signal instead of attach-test."
+            "Check signal-cli connectivity and daemon logs. If Mose is running, "
+            "send `resend upcoming latest` in the Signal admin group."
         )
         return 4
     finally:

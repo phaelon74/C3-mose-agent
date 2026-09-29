@@ -772,6 +772,21 @@ async def maybe_alert_failures(store: UpcomingStore, cfg: UpcomingConfig, kind: 
     )
 
 
+def format_recommendation_summary(
+    slug: str, counts: dict[str, int], *, approval_available: bool, status: str = "proposed",
+) -> str:
+    summary = (
+        f"Upcoming recommendations {slug}: "
+        f"{counts.get('movie', 0)} movies, {counts.get('tv', 0)} TV, "
+        f"{counts.get('anime', 0)} anime ({counts.get('total', 0)} total)."
+    )
+    if approval_available:
+        return summary + (
+            f"\nReply `approve {slug}` or `approve {slug} 1,4,7` or `reject {slug}`."
+        )
+    return summary + f"\nStatus: {status}. No active approval is available."
+
+
 async def run_weekly_recommend(
     store: UpcomingStore,
     cfg: UpcomingConfig,
@@ -822,11 +837,8 @@ async def run_weekly_recommend(
                 },
                 expires_at=expires,
             )
-        summary = (
-            f"Upcoming recommendations {slug}: "
-            f"{counts['movie']} movies, {counts['tv']} TV, {counts['anime']} anime "
-            f"({counts['total']} total).\n"
-            f"Reply `approve {slug}` or `approve {slug} 1,4,7` or `reject {slug}`."
+        summary = format_recommendation_summary(
+            slug, counts, approval_available=memory is not None and counts.get("total", 0) > 0,
         )
         await _call_notify(_notify, summary, str(path), str(path))
         store.finish_sync_run(week_id, status="ok", stats=counts)

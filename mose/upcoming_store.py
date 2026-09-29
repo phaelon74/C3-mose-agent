@@ -546,6 +546,12 @@ class UpcomingStore:
         self.db.commit()
         return run_id
 
+    def latest_recommendation_run(self) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT slug FROM recommendation_runs ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return self.get_recommendation_run(row[0]) if row else None
+
     def get_recommendation_run(self, slug: str) -> dict[str, Any] | None:
         row = self.db.execute(
             "SELECT id, slug, created_at, report_path, status, counts FROM recommendation_runs WHERE slug = ?",

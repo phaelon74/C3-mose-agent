@@ -356,7 +356,7 @@ async def test_send_message_includes_attachments(tmp_path):
     params = captured[0]["params"]
     assert params["groupId"] == "adm-gid"
     assert params["message"] == "Weekly list"
-    assert params["attachments"] == [str(md.resolve())]
+    assert params["attachments"] == ["data:text/markdown;filename=upcoming-2026-W12.md;base64,IyBoaQo="]
 
 
 @pytest.mark.asyncio
