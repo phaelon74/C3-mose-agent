@@ -691,6 +691,10 @@ def set_approval_context(incoming_group_id: str, bot: "MoseSignalBot") -> None:
 async def _signal_approval_callback(command: str, reason: str, target_system: str) -> bool:
     """Prompt admin group for approval, allowing 60 minutes for a reply."""
     ctx = _approval_ctx.get() or _last_approval_ctx
+    if not ctx and _active_bot is not None:
+        # HTTP bridge handlers do not inherit the initiating message's context.
+        # This selects a destination only; a human reply is still required.
+        ctx = {"incoming_group_id": _active_bot.config.admin_group_id, "bot": _active_bot}
     if not ctx:
         log_event(logger, "signal_approval_no_context", target_system=target_system)
         return False
@@ -705,6 +709,11 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
     if not admin_gid:
         return False
 
+    pending = bot._pending_approval.get(admin_gid)
+    if pending is not None and not pending.done():
+        log_event(logger, "signal_approval_busy", target_system=target_system)
+        return False
+
     title = "MCP Tool Approval" if target_system.startswith("mcp:") else "SRE Execute Approval"
     prompt = (
         f"{title}\n\n"
@@ -713,27 +722,26 @@ async def _signal_approval_callback(command: str, reason: str, target_system: st
         f"Command: {command[:500]}{'...' if len(command) > 500 else ''}\n\n"
         f"Reply with 'y', 'yes', or 'approve' within {ADMIN_APPROVAL_TIMEOUT_SECONDS // 60} minutes."
     )
-    await bot._send_message(admin_gid, prompt)
-
-    if eng_gid and incoming == eng_gid and eng_gid != admin_gid:
-        try:
-            await bot._send_message(
-                eng_gid,
-                "Awaiting admin approval in the admin channel…",
-            )
-        except Exception:
-            logger.exception("signal_sre_execute_engagement_notice_failed")
-
     future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
     bot._pending_approval[admin_gid] = future
 
     try:
+        # Register before sending so a quick reply cannot miss the waiter.
+        await bot._send_message(admin_gid, prompt)
+        if eng_gid and incoming == eng_gid and eng_gid != admin_gid:
+            try:
+                await bot._send_message(eng_gid, "Awaiting admin approval in the admin channel…")
+            except Exception:
+                logger.exception("signal_sre_execute_engagement_notice_failed")
         approved = await asyncio.wait_for(future, ADMIN_APPROVAL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         await bot._send_message(admin_gid, "Approval timed out. Execution denied.")
         approved = False
     finally:
-        bot._pending_approval.pop(admin_gid, None)
+        if bot._pending_approval.get(admin_gid) is future:
+            bot._pending_approval.pop(admin_gid, None)
+        if not future.done():
+            future.cancel()
 
     if not approved:
         await bot._send_message(admin_gid, "Execution denied.")
@@ -1014,7 +1022,26 @@ class MoseSignalBot:
             self._log_unknown_channel_once(group_id)
             return
 
+        # Deterministic approval/retry commands can execute MCP before reaching
+        # the conversational agent. Establish routing before any such dispatch.
+        set_approval_context(group_id, self)
+
         if await _handle_upcoming_resend(self, group_id, content):
+            return
+
+        tokens = content.split()
+        if len(tokens) >= 2 and [t.lower() for t in tokens[:2]] == ["retry", "upcoming"]:
+            if group_id != adm:
+                return
+            if len(tokens) < 4 or not re.fullmatch(r"upcoming-\d{4}-w\d{1,2}", tokens[2], re.IGNORECASE):
+                await self._send_message(adm, "Usage: retry upcoming upcoming-YYYY-Www 1,4,7 (or 1-23)")
+                return
+            if (pending := self._pending_approval.get(adm)) is not None and not pending.done():
+                await self._send_message(adm, "Please answer the current approval prompt before retrying a batch.")
+                return
+            from mose.upcoming_decision import retry_upcoming_adds
+
+            await retry_upcoming_adds(tokens[2], ",".join(tokens[3:]), recipient=adm)
             return
 
         if group_id == adm:
@@ -1046,8 +1073,6 @@ class MoseSignalBot:
             source=source,
             group_id=group_id,
         )
-
-        set_approval_context(group_id, self)
 
         async def _send_status(tool_name: str, arguments: str) -> None:
             status = _format_status(tool_name, arguments)

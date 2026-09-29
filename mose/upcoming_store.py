@@ -605,6 +605,29 @@ class UpcomingStore:
         )
         self.db.commit()
 
+    def claim_recommendation_retry(self, slug: str) -> bool:
+        cur = self.db.execute(
+            "UPDATE recommendation_runs SET status = 'adding' WHERE slug = ? AND status = 'partial'",
+            (slug,),
+        )
+        self.db.commit()
+        return cur.rowcount == 1
+
+    def record_add_result(self, run_id: int, result: dict[str, Any]) -> None:
+        row = self.db.execute(
+            "SELECT payload FROM recommendation_items WHERE run_id = ? AND line_number = ?",
+            (run_id, result["line"]),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Recommendation item disappeared while recording add result")
+        payload = json.loads(row[0]) if row[0] else {}
+        payload["_add_result"] = result
+        self.db.execute(
+            "UPDATE recommendation_items SET payload = ? WHERE run_id = ? AND line_number = ?",
+            (json.dumps(payload), run_id, result["line"]),
+        )
+        self.db.commit()
+
     def prune(self, *, catalog_cutoff_date: str, recommendation_cutoff_ts: float) -> dict[str, int]:
         """Drop old catalog rows and recommendation runs."""
         cur_t = self.db.execute(

@@ -946,6 +946,7 @@ async def execute_upcoming_adds(
     *,
     execute_codemode: Callable[[str, int], Awaitable[tuple[str, bool]]] | None = None,
     add_http: Callable[..., Awaitable[str]] | None = None,
+    record_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     from mose.tools import enter_scheduled_execution, exit_scheduled_execution
 
@@ -967,8 +968,14 @@ async def execute_upcoming_adds(
                     # Code Mode reports runtime errors in its JSON envelope even
                     # when the outer MCP call itself is not marked as an error.
                     execution = json.loads(text)
-                    if not isinstance(execution, dict) or execution.get("errors"):
+                    if not isinstance(execution, dict):
                         raise RuntimeError(f"Add/search not confirmed: {text[:1500]}")
+                    if execution.get("errors"):
+                        messages = [
+                            str(error.get("message", error)) if isinstance(error, dict) else str(error)
+                            for error in execution["errors"]
+                        ]
+                        raise RuntimeError("Add/search not confirmed: " + "; ".join(messages)[:1500])
                     added = json.loads(execution.get("stdout") or "{}")
                     resource = "movie" if it.kind == "movie" else "series"
                     if not isinstance(added, dict) or added.get("success") is not True or not (
@@ -989,6 +996,9 @@ async def execute_upcoming_adds(
             except Exception as e:
                 logger.exception("upcoming_add_item_failed", extra={"line": it.line_number, "title": it.title})
                 results.append({"line": it.line_number, "title": it.title, "ok": False, "detail": str(e)[:500]})
+            finally:
+                if record_result is not None and results and results[-1]["line"] == it.line_number:
+                    record_result(results[-1])
     finally:
         exit_scheduled_execution(token)
     return results

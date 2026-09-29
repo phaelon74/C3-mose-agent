@@ -950,6 +950,13 @@ This uses the running bot and the saved file. It does not regenerate the report,
 add media, approve anything, or extend approval expiry. Only active approvals
 include approve/reject instructions in the resend message.
 
+To retry selected lines from a failed approved batch, send in the admin group:
+`retry upcoming upcoming-YYYY-Www 1,4,7` (ranges such as `1-23` also work).
+This reuses the stored report and requires a fresh add-and-search approval for
+each selected item. Recorded successful lines are skipped. Older batches lack
+per-item outcomes, so select only the failed lines from their result message.
+Resending the Markdown alone does not retry additions.
+
 Optional systemd catch-up: `mose-upcoming-sync.timer` (daily `--upcoming-sync`).
 
 ---
