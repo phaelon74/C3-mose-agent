@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import aiohttp
@@ -158,6 +159,113 @@ def pick_quality_profile(profiles: list[dict[str, Any]], *, explicit_id: int = 0
     return ids[0] if ids else None
 
 
+MOVIE_GENRE_FAMILY_ID = 10751
+MOVIE_GENRE_HORROR_ID = 27
+
+
+def build_movie_routing(
+    folders: list[dict[str, Any]],
+    *,
+    base_path: str = "",
+    kids_match: str = "Kids",
+    horror_match: str = "Scary",
+) -> dict[str, Any]:
+    """Pre-resolve Radarr root folders into a bucket map for movie adds.
+
+    Buckets: ``kids`` (Kids Movies), ``horror`` (Scary Movies), ``base``
+    (the main Movies root, catch-all), ``years`` (exact-year folders that
+    Radarr has registered, keyed by int year), ``decades`` (60s-70s/80s/90s/
+    00s, keyed by the decade start year, e.g. 1990 -> /Movies/90s). ``osr``
+    and any other folder are never routed automatically.
+    """
+    paths: list[str] = []
+    for f in folders:
+        if not isinstance(f, dict):
+            continue
+        p = str(f.get("path") or "").rstrip("/")
+        if p:
+            paths.append(p)
+
+    def hit(needle: str) -> str:
+        needle = (needle or "").strip()
+        if not needle:
+            return ""
+        hits = [p for p in paths if needle.lower() in p.lower()]
+        if not hits:
+            return ""
+        hits.sort(key=len, reverse=True)
+        return hits[0]
+
+    kids = hit(kids_match)
+    horror = hit(horror_match)
+    decade_re = re.compile(r"(?:^|/)(\d{2})s(?:-70s)?$", re.IGNORECASE)
+    year_re = re.compile(r"(?:^|/)(\d{4})$")
+    decades: dict[int, str] = {}
+    years: dict[int, str] = {}
+    for p in paths:
+        if kids and p == kids:
+            continue
+        if horror and p == horror:
+            continue
+        m = decade_re.search(p)
+        if m:
+            yy = int(m.group(1))
+            decade = 1900 + yy if yy >= 60 else 2000 + yy
+            if 1960 <= decade <= 2000:
+                decades.setdefault(decade, p)
+                if m.group(0).lower().endswith("-70s"):
+                    # "60s-70s" spans two decades; register both keys.
+                    decades.setdefault(decade + 10, p)
+            continue
+        m = year_re.search(p)
+        if m:
+            yyyy = int(m.group(1))
+            if 1900 <= yyyy <= 2199:
+                years.setdefault(yyyy, p)
+    if (base_path or "").strip():
+        base = base_path.strip().rstrip("/")
+    else:
+        candidates = [
+            p
+            for p in paths
+            if p not in (kids, horror)
+            and not decade_re.search(p)
+            and not year_re.search(p)
+            and not p.lower().endswith("/osr")
+        ]
+        candidates.sort(key=len)
+        base = candidates[0] if candidates else ""
+    return {"kids": kids, "horror": horror, "base": base, "years": years, "decades": decades}
+
+
+def route_movie_root(routing: dict[str, Any], *, genres: list[Any], year: int | None) -> str:
+    """Pick the Radarr root folder for one movie.
+
+    Precedence: horror (Horror wins Kids/Family ties) -> kids (TMDB Family
+    genre 10751) -> exact year folder (whatever Radarr registered) -> decade
+    folder (60s-70s, 80s, 90s, 00s) -> base Movies root. ``osr`` is never
+    routed automatically.
+    """
+    ids = {int(g) for g in (genres or []) if isinstance(g, (int, float)) or (isinstance(g, str) and g.isdigit())}
+    if MOVIE_GENRE_HORROR_ID in ids and routing.get("horror"):
+        return routing["horror"]
+    if MOVIE_GENRE_FAMILY_ID in ids and routing.get("kids"):
+        return routing["kids"]
+    if year:
+        y = int(year)
+        years = routing.get("years") or {}
+        decades = routing.get("decades") or {}
+        # Keys arrive as ints in-memory but as strings after a JSON roundtrip
+        # through the arr_config table.
+        hit = years.get(y) or years.get(str(y))
+        if hit:
+            return hit
+        decade = (y // 10) * 10
+        return decades.get(decade) or decades.get(str(decade)) or routing.get("base") or ""
+    return routing.get("base") or ""
+
+
+
 def resolve_arr_targets(
     *,
     radarr_folders: list[dict[str, Any]],
@@ -169,6 +277,8 @@ def resolve_arr_targets(
     sonarr_anime_root_path: str = "",
     sonarr_tv_root_match: str = "/TV",
     sonarr_anime_root_match: str = "/Anime",
+    radarr_kids_root_match: str = "Kids",
+    radarr_horror_root_match: str = "Scary",
     radarr_quality_profile_id: int = 0,
     sonarr_tv_quality_profile_id: int = 0,
     sonarr_anime_quality_profile_id: int = 0,
@@ -185,8 +295,15 @@ def resolve_arr_targets(
         anime_alt = pick_root_folder(sonarr_folders, match=sonarr_anime_root_match, explicit="")
         if tv_alt != anime_alt:
             tv_root, anime_root = tv_alt, anime_alt
+    movie_routing = build_movie_routing(
+        radarr_folders,
+        base_path=radarr_root_path,
+        kids_match=radarr_kids_root_match,
+        horror_match=radarr_horror_root_match,
+    )
     return {
-        "radarr_root_path": pick_root_folder(radarr_folders, explicit=radarr_root_path),
+        "radarr_root_path": movie_routing.get("base") or "",
+        "radarr_movie_routing": movie_routing,
         "sonarr_tv_root_path": tv_root,
         "sonarr_anime_root_path": anime_root,
         "radarr_quality_profile_id": pick_quality_profile(

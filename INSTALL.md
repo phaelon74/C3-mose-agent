@@ -931,6 +931,15 @@ python -m mose --upcoming-attach-test data/logs/test.md
 Approve in Signal: `approve upcoming-YYYY-Www` or `approve upcoming-YYYY-Www 1,4,7`.
 Selected titles are added with monitoring and search-on-add explicitly enabled
 (Radarr movie search; Sonarr missing-episode search for the added series).
+Each movie is routed to its Radarr root folder by TMDB genre and release year:
+Horror → `Scary Movies`, Family → `Kids Movies` (Horror wins ties), otherwise
+the matching year folder (e.g. `/Movies/2019`) or decade folder (`60s-70s` =
+1960s-1970s, `80s`, `90s`, `00s` = 2000s); anything else (pre-1960, future
+years, missing year) lands in the main `/Movies` root. `Movies/osr` is never
+routed automatically. The weekly report table shows the destination **Folder**
+per movie, and the per-item approval prompt displays the resolved
+`rootFolderPath` before you reply. Configure bucket detection with
+`radarr_kids_root_match` / `radarr_horror_root_match` in `[upcoming]`.
 The Code Mode add calls retain their admin approval prompts, with search flags
 included in the arguments. Each selected item is processed sequentially; its
 combined add-and-search prompt allows **60 minutes** to reply in the admin group

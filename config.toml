@@ -105,6 +105,9 @@ failure_threshold = 3
 # Auto-discover Sonarr TV vs Anime folders by path substring:
 sonarr_tv_root_match = "/TV"
 sonarr_anime_root_match = "/Anime"
+# Auto-discover Radarr movie buckets (horror wins Family ties; osr is never routed):
+radarr_kids_root_match = "Kids"
+radarr_horror_root_match = "Scary"
 # Optional explicit paths / profile ids (0 = first profile from *arr):
 # sonarr_tv_root_path = ""
 # sonarr_anime_root_path = ""

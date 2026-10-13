@@ -19,6 +19,7 @@ from mose.upcoming_arr import (
     add_movie_payload,
     add_series_payload,
     resolve_arr_targets,
+    route_movie_root,
     snapshot_radarr,
     snapshot_sonarr,
 )
@@ -252,6 +253,7 @@ def select_recommendations(
                         "imdb_id": t.imdb_id,
                         "relevant_date": rel.isoformat() if rel else None,
                         "original_language": t.original_language,
+                        "genres": list(t.genres or []),
                         "score_breakdown": format_score_breakdown(t, today=today),
                     },
                 )
@@ -291,6 +293,7 @@ def render_markdown(
     generated_at: str,
     sync_at: str | None,
     today: date | None = None,
+    arr_cfg: dict[str, Any] | None = None,
 ) -> str:
     counts = {"movie": 0, "tv": 0, "anime": 0}
     for it in items:
@@ -323,10 +326,14 @@ def render_markdown(
             lines.append("_No eligible titles this week._")
             lines.append("")
             continue
-        lines.append(
-            "| # | Title | Year | Dates | Popularity | Score | IDs |"
-        )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        if kind == "movie" and arr_cfg is not None:
+            lines.append("| # | Title | Year | Dates | Popularity | Score | IDs | Folder |")
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        else:
+            lines.append(
+                "| # | Title | Year | Dates | Popularity | Score | IDs |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for it in subset:
             p = it.payload or {}
             if kind == "movie":
@@ -342,10 +349,16 @@ def render_markdown(
             trend = " trending" if p.get("on_trending_week") else ""
             breakdown = p.get("score_breakdown") or ""
             score_cell = f"{it.score:.1f} ({breakdown})" if breakdown else f"{it.score:.1f}"
-            lines.append(
+            row = (
                 f"| {it.line_number} | {it.title} | {it.year or '—'} | {dates} | "
-                f"{p.get('popularity', '')}{trend} | {score_cell} | {ids} |"
+                f"{p.get('popularity', '')}{trend} | {score_cell} | {ids}"
             )
+            if kind == "movie" and arr_cfg is not None:
+                folder = movie_root_for_item(it, arr_cfg)
+                row += f" | {folder or '—'} |"
+            else:
+                row += " |"
+            lines.append(row)
         lines.append("")
     return "\n".join(lines)
 
@@ -636,6 +649,8 @@ async def ingest_arr(store: UpcomingStore, cfg: UpcomingConfig) -> dict[str, int
         sonarr_folders=sonarr_folders,
         sonarr_profiles=sonarr_profiles,
         radarr_root_path=cfg.radarr_root_path,
+        radarr_kids_root_match=cfg.radarr_kids_root_match,
+        radarr_horror_root_match=cfg.radarr_horror_root_match,
         sonarr_tv_root_path=cfg.sonarr_tv_root_path,
         sonarr_anime_root_path=cfg.sonarr_anime_root_path,
         sonarr_tv_root_match=cfg.sonarr_tv_root_match,
@@ -722,6 +737,7 @@ def build_recommendation(
         generated_at=when.isoformat(timespec="minutes"),
         sync_at=sync_at,
         today=today,
+        arr_cfg=store.get_arr_config() or None,
     )
     path = Path(log_dir) / f"{slug}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -854,8 +870,32 @@ async def run_weekly_recommend(
         return {"status": "failed", "error": str(e)}
 
 
+def movie_root_for_item(item: RecommendationItem, arr_cfg: dict[str, Any]) -> str:
+    """Radarr root folder for one movie item.
+
+    Routes live from the bucket map captured at the last library sync so the
+    approval prompt always reflects current Radarr config. Falls back to the
+    plain base root when no routing was ever resolved.
+    """
+    routing = arr_cfg.get("radarr_movie_routing")
+    if isinstance(routing, dict) and any(
+        routing.get(k) for k in ("base", "years", "decades", "kids", "horror")
+    ):
+        root = route_movie_root(
+            routing,
+            genres=list((item.payload or {}).get("genres") or []),
+            year=item.year,
+        )
+        if root:
+            return root
+    return str(arr_cfg.get("radarr_root_path") or "")
+
+
 def codemode_add_movie(item: RecommendationItem, arr_cfg: dict[str, Any]) -> str:
-    root = json_dumps(arr_cfg.get("radarr_root_path") or "")
+    root_val = movie_root_for_item(item, arr_cfg)
+    if not root_val:
+        raise RuntimeError("Radarr root folder is not resolved for this movie")
+    root = json_dumps(root_val)
     qid = int(arr_cfg.get("radarr_quality_profile_id") or 0)
     return (
         "const r = await mcp.plex_stack_automation.radarr_add_movie({\n"
@@ -905,7 +945,7 @@ def codemode_add_series(item: RecommendationItem, arr_cfg: dict[str, Any]) -> st
 async def add_item_http(item: RecommendationItem, cfg: UpcomingConfig, arr_cfg: dict[str, Any]) -> str:
     if item.kind == "movie":
         qid = int(arr_cfg.get("radarr_quality_profile_id") or 0)
-        root = str(arr_cfg.get("radarr_root_path") or "")
+        root = movie_root_for_item(item, arr_cfg)
         if not qid or not root:
             raise RuntimeError("Radarr root folder or quality profile is not resolved")
         async with ArrHttpClient(cfg.radarr_url, cfg.radarr_api_key) as client:

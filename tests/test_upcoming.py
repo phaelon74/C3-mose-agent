@@ -20,11 +20,13 @@ from mose.upcoming import (
     build_recommendation,
     canonical_upcoming_slug,
     compute_score,
+    codemode_add_movie,
     execute_upcoming_adds,
     format_score_breakdown,
     in_recommendation_window,
     iso_week_slug,
     needs_details,
+    movie_root_for_item,
     parse_line_numbers,
     passes_rec_filters,
     render_markdown,
@@ -33,11 +35,13 @@ from mose.upcoming import (
     should_run_weekly,
 )
 from mose.upcoming_arr import (
+    build_movie_routing,
     compact_movie_row,
     movie_from_radarr,
     paginate_index,
     pick_root_folder,
     resolve_arr_targets,
+    route_movie_root,
     series_from_sonarr,
 )
 from mose.upcoming_decision import format_upcoming_recovery_message, handle_upcoming_decision, init_upcoming_decision_runtime
@@ -608,6 +612,143 @@ class TestArrHelpers:
         assert series_from_sonarr({"title": "x"}) is None
         m = movie_from_radarr({"tmdbId": 9, "id": 1, "title": "T", "year": 2026, "hasFile": True})
         assert m is not None and m.tmdb_id == 9
+
+
+RADARR_BUCKETS = [
+    "/media/c3dp01/Kids Movies",
+    "/media/c3dp01/Movies",
+    "/media/c3dp01/Movies/00s",
+    "/media/c3dp01/Movies/60s-70s",
+    "/media/c3dp01/Movies/80s",
+    "/media/c3dp01/Movies/90s",
+    "/media/c3dp01/Movies/2010",
+    "/media/c3dp01/Movies/2025",
+    "/media/c3dp01/Movies/2026",
+    "/media/c3dp01/Movies/osr",
+    "/media/c3dp01/Scary Movies",
+]
+
+
+class TestMovieBucketRouting:
+    def _routing(self, store: UpcomingStore) -> dict:
+        resolved = resolve_arr_targets(
+            radarr_folders=[{"path": p} for p in RADARR_BUCKETS],
+            radarr_profiles=[{"id": 1}],
+            sonarr_folders=[{"path": "/media/c3dp01/tv"}, {"path": "/media/c3dp01/Anime"}],
+            sonarr_profiles=[{"id": 1}],
+        )
+        store.set_arr_config(resolved)
+        # JSON roundtrip through arr_config mirrors the real add path.
+        return store.get_arr_config()["radarr_movie_routing"]
+
+    def test_routing_map_shape(self, tmp_path: Path):
+        store = UpcomingStore(tmp_path / "u.db")
+        r = self._routing(store)
+        assert r["kids"] == "/media/c3dp01/Kids Movies"
+        assert r["horror"] == "/media/c3dp01/Scary Movies"
+        assert r["base"] == "/media/c3dp01/Movies"
+        assert r["years"]["2026"] == "/media/c3dp01/Movies/2026"
+        assert r["decades"]["1990"] == "/media/c3dp01/Movies/90s"
+        # osr and category buckets are never year/decade candidates
+        assert not any("osr" in v for v in r["years"].values())
+        assert not any("osr" in v for v in r["decades"].values())
+        store.close()
+
+    def test_horror_beats_kids_and_year(self):
+        r = build_movie_routing([{"path": p} for p in RADARR_BUCKETS])
+        assert route_movie_root(r, genres=[27, 28, 53], year=2026) == "/media/c3dp01/Scary Movies"
+        # Family + Horror tie -> horror wins
+        assert route_movie_root(r, genres=[16, 10751, 27], year=2026) == "/media/c3dp01/Scary Movies"
+
+    def test_kids_family_bucket(self):
+        r = build_movie_routing([{"path": p} for p in RADARR_BUCKETS])
+        assert route_movie_root(r, genres=[10751, 16], year=2026) == "/media/c3dp01/Kids Movies"
+
+    def test_year_decade_and_fallback(self):
+        r = build_movie_routing([{"path": p} for p in RADARR_BUCKETS])
+        assert route_movie_root(r, genres=[99], year=2026) == "/media/c3dp01/Movies/2026"
+        assert route_movie_root(r, genres=[18], year=2010) == "/media/c3dp01/Movies/2010"
+        assert route_movie_root(r, genres=[18], year=1995) == "/media/c3dp01/Movies/90s"
+        assert route_movie_root(r, genres=[35], year=2005) == "/media/c3dp01/Movies/00s"
+        assert route_movie_root(r, genres=[28], year=1965) == "/media/c3dp01/Movies/60s-70s"
+        assert route_movie_root(r, genres=[80], year=1975) == "/media/c3dp01/Movies/60s-70s"
+        # Pre-1960 and future years have no bucket -> base Movies catch-all
+        assert route_movie_root(r, genres=[18], year=1955) == "/media/c3dp01/Movies"
+        assert route_movie_root(r, genres=[18], year=2027) == "/media/c3dp01/Movies"
+        assert route_movie_root(r, genres=[9648], year=None) == "/media/c3dp01/Movies"
+
+    def test_codemode_script_routes_per_item(self, tmp_path: Path):
+        store = UpcomingStore(tmp_path / "u.db")
+        resolved = resolve_arr_targets(
+            radarr_folders=[{"path": p} for p in RADARR_BUCKETS],
+            radarr_profiles=[{"id": 1}],
+            sonarr_folders=[{"path": "/tv"}],
+            sonarr_profiles=[{"id": 1}],
+        )
+        store.set_arr_config(resolved)
+        arr_cfg = store.get_arr_config()
+        arr_cfg["radarr_quality_profile_id"] = 1
+        horror = RecommendationItem(
+            line_number=1, kind="movie", tmdb_id=1437195, title="Livestream from Hell",
+            year=2026, payload={"genres": [27, 28, 53]},
+        )
+        music = RecommendationItem(
+            line_number=2, kind="movie", tmdb_id=1447853, title="Oasis: Don't Look Back in Anger",
+            year=2026, payload={"genres": [99, 10402]},
+        )
+        kids = RecommendationItem(
+            line_number=3, kind="movie", tmdb_id=3, title="Toy Story 5",
+            year=2026, payload={"genres": [16, 10751]},
+        )
+        assert 'rootFolderPath: "/media/c3dp01/Scary Movies"' in codemode_add_movie(horror, arr_cfg)
+        assert 'rootFolderPath: "/media/c3dp01/Movies/2026"' in codemode_add_movie(music, arr_cfg)
+        assert 'rootFolderPath: "/media/c3dp01/Kids Movies"' in codemode_add_movie(kids, arr_cfg)
+        store.close()
+
+    def test_legacy_arr_config_falls_back_to_base(self):
+        # Old arr_config rows saved before movie routing existed.
+        arr_cfg = {"radarr_root_path": "/media/c3dp01/Movies", "radarr_quality_profile_id": 1}
+        it = RecommendationItem(
+            line_number=1, kind="movie", tmdb_id=9, title="X", year=2026, payload={"genres": [27]}
+        )
+        assert movie_root_for_item(it, arr_cfg) == "/media/c3dp01/Movies"
+        with pytest.raises(RuntimeError):
+            codemode_add_movie(it, {})
+
+    def test_report_shows_folder_column(self, tmp_path: Path):
+        store = UpcomingStore(tmp_path / "u.db")
+        self._routing(store)
+        items = [
+            RecommendationItem(
+                line_number=1, kind="movie", tmdb_id=1, title="Scary", year=2026, score=5,
+                payload={"genres": [27]},
+            ),
+            RecommendationItem(
+                line_number=2, kind="movie", tmdb_id=2, title="Yearless", year=None, score=4,
+                payload={"genres": [35]},
+            ),
+        ]
+        md = render_markdown(
+            items, slug="upcoming-2026-W12", generated_at="t", sync_at="s",
+            arr_cfg=store.get_arr_config(),
+        )
+        assert "Folder |" in md
+        assert "| Scary | 2026 |" in md
+        assert "/media/c3dp01/Scary Movies |" in md
+        assert "| Yearless | — |" in md
+        assert "/media/c3dp01/Movies |" in md
+        store.close()
+
+    def test_report_without_arr_config_has_no_folder_column(self):
+        items = [
+            RecommendationItem(
+                line_number=1, kind="movie", tmdb_id=1, title="A", year=2026, score=5,
+                payload={"score_breakdown": "pop 20"},
+            )
+        ]
+        md = render_markdown(items, slug="s", generated_at="t", sync_at="s")
+        assert "Folder" not in md
+        assert "| 1 | A |" in md
 
 
 class TestBundledApprove:

@@ -237,6 +237,8 @@ class UpcomingConfig:
     sonarr_tv_root_path: str = ""
     sonarr_anime_root_path: str = ""
     radarr_root_path: str = ""
+    radarr_kids_root_match: str = "Kids"
+    radarr_horror_root_match: str = "Scary"
     radarr_quality_profile_id: int = 0
     sonarr_tv_quality_profile_id: int = 0
     sonarr_anime_quality_profile_id: int = 0
