@@ -9,8 +9,8 @@
 #
 # Bring up (agent + sandbox + Code Mode portal + optional Plex + arr MCP sidecars; see INSTALL.md D):
 #   export DOCKER_GID=$(getent group docker | cut -d: -f3)
-#   docker compose build mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics
-#   docker compose up -d mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics
+#   docker compose build mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics plex-issues-diagnostics
+#   docker compose up -d mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics plex-issues-diagnostics
 #
 # Periodic skill review (run from a systemd timer on the host):
 #   docker compose run --rm mose-skill-review
@@ -55,6 +55,8 @@ services:
       radarr-diagnostics:
         condition: service_started
       nzbget-diagnostics:
+        condition: service_started
+      plex-issues-diagnostics:
         condition: service_started
     environment:
       MCP_PORTAL_CONFIG: /app/mcp_servers.portal.json
