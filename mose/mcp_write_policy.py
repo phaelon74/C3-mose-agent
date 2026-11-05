@@ -16,6 +16,7 @@ PROTECTED_MCP_SERVERS = frozenset({
     "sonarr-diagnostics",
     "radarr-diagnostics",
     "nzbget-diagnostics",
+    "plex-issues",
 })
 
 # vladimir-tutin/plex-mcp-server — read-only tools (everything else needs approval).
@@ -169,12 +170,20 @@ _NZBGET_DIAG_READS: frozenset[str] = frozenset({
     "nzbget_servervolumes",
 })
 
+# docker/plex-issues-diagnostics — read-only plex.tv Reported Issues GraphQL.
+_PLEX_ISSUES_READS: frozenset[str] = frozenset({
+    "plex_issues_list",
+    "plex_issues_get",
+    "plex_issues_comments",
+})
+
 _READ_BY_SERVER: dict[str, frozenset[str]] = {
     "plex-ops-admin": _PLEX_OPS_READS,
     "plex-stack-automation": _PLEX_STACK_READS,
     "sonarr-diagnostics": _SONARR_DIAG_READS,
     "radarr-diagnostics": _RADARR_DIAG_READS,
     "nzbget-diagnostics": _NZBGET_DIAG_READS,
+    "plex-issues": _PLEX_ISSUES_READS,
 }
 
 

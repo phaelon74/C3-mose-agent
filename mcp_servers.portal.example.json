@@ -25,6 +25,16 @@
       ],
       "transport": "stdio"
     },
+    "plex-issues": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-plex-issues-diagnostics",
+        "/usr/local/bin/mcp-entrypoint"
+      ],
+      "transport": "stdio"
+    },
     "sonarr-diagnostics": {
       "command": "docker",
       "args": [

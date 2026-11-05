@@ -65,6 +65,19 @@ For almost all Plex TV/movies in this stack, content is Sonarr/Radarr-managed �
 
 Only fall back to probing Plex `media_get_details` for unmanaged Plex-only content (see `scripts/plex_media_probe.py`).
 
+
+## Reported Issues (`plex-issues`)
+
+The owner-only Reported Issues feed is **GraphQL on `https://community.plex.tv/api`** (plex.tv cloud), NOT a PMS endpoint — `{PLEX_URL}/api/reportedissues` is 404. Read-only, via the `plex-issues` sidecar.
+
+```ts
+const list = await mcp.plex_issues.plex_issues_list({ limit: 25 });
+const one = await mcp.plex_issues.plex_issues_get({ id: "<report id>" });
+const cmts = await mcp.plex_issues.plex_issues_comments({ id: "<report id>" });
+```
+
+Each row: `{ id, user, date, message, ratingKey, commentCount }`. `ratingKey` is parsed from the report's `server://…/library/metadata/<ratingKey>` URL — resolve it to series/season/episode with the existing `plex_ops_admin.media_get_details` chain (see Read-only examples above).
+
 ## Mutations (admin approval)
 
 Scan, refresh, butler tasks, session stop, etc. are **not** on the read allowlist — they trigger the normal portal mutation approval flow.

@@ -135,6 +135,19 @@ services:
       PLEX_ENABLE_MUTATIVE_OPS: "false"
     restart: unless-stopped
 
+  # Plex Reported Issues MCP — read-only plex.tv GraphQL sidecar (idle; docker exec bridge).
+  plex-issues-diagnostics:
+    build:
+      context: .
+      dockerfile: docker/plex-issues-diagnostics/Dockerfile
+    container_name: mose-plex-issues-diagnostics
+    networks:
+      - mose-net
+    environment:
+      PLEXTV_TOKEN: ${PLEXTV_TOKEN:-${PLEX_TOKEN:-}}
+    restart: unless-stopped
+
+
   # Sonarr diagnostics MCP — Python *arr API tools (queue/import/logs/commands).
   # Same image as radarr-diagnostics; env selects Sonarr only.
   sonarr-diagnostics:
