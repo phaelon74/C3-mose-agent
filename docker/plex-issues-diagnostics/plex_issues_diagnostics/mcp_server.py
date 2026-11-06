@@ -19,16 +19,34 @@ from plex_issues_diagnostics.client import (
 from plex_issues_diagnostics.util import safe_tool_decorator
 
 
+def _resolve_report_id(c: PlexIssuesClient, id: int | str) -> str | None:
+    """Return the report UUID for ``id``.
+
+    Accepts the UUID directly. Also accepts a ratingKey (int) — Mose passes these
+    naturally — and resolves it by scanning the list feed for a matching row
+    (one page of 100; newest-first so recent reports resolve immediately).
+    Returns None when the id cannot be resolved.
+    """
+    s = str(id).strip()
+    if not s:
+        return None
+    if "-" in s:  # UUID shape
+        return s
+    try:
+        rating_key = int(s)
+    except ValueError:
+        return s  # opaque string; let reportByID decide
+    data = c.query("getReportedIssues", REPORTS_QUERY, {"first": 100})
+    for node in (data.get("reports") or {}).get("nodes") or []:
+        row = parse_report(node)
+        if row.get("ratingKey") == rating_key:
+            return str(row.get("id") or "")
+    return None
+
+
 def build_plex_issues_app(c: PlexIssuesClient) -> FastMCP:
     mcp = FastMCP("plex-issues-diagnostics")
     tool = safe_tool_decorator(mcp.tool)
-
-    def _envelope(data: dict[str, Any], node_key: str, limit: int) -> dict[str, Any]:
-        """Unwrap ``data[node_key]`` defensively; a null node means not found."""
-        raw = (data or {}).get(node_key)
-        if raw is None:
-            return {"error": "not_found", "id": (data or {}).get("__id__", "")}
-        return raw
 
     @tool()
     def plex_issues_list(limit: int = 25) -> str:
@@ -53,39 +71,48 @@ def build_plex_issues_app(c: PlexIssuesClient) -> FastMCP:
         return json_response({"issues": rows, "count": len(rows)})
 
     @tool()
-    def plex_issues_get(id: str) -> str:
-        """Fetch a single Reported Issue by id. Read-only."""
-        data = c.query("reportByID", REPORT_BY_ID_QUERY, {"id": str(id)})
+    def plex_issues_get(id: int | str) -> str:
+        """Fetch a single Reported Issue by report UUID (or ratingKey int, auto-resolved via the list feed). Read-only."""
+        rid = _resolve_report_id(c, id)
+        if rid is None:
+            return json_response({"error": "not_found", "id": str(id)})
+        data = c.query("reportByID", REPORT_BY_ID_QUERY, {"id": rid})
         node = data.get("reportByID")
         if node is None:
-            return json_response({"error": "not_found", "id": str(id)})
+            return json_response({"error": "not_found", "id": rid})
         return json_response(parse_report(node))
 
     @tool()
-    def plex_issues_comments(id: str, limit: int = 50) -> str:
-        """Fetch comments on a Reported Issue. Read-only."""
+    def plex_issues_comments(id: int | str, limit: int = 50) -> str:
+        """Fetch comments on a Reported Issue by report UUID (or ratingKey int, auto-resolved). Read-only."""
+        rid = _resolve_report_id(c, id)
+        if rid is None:
+            return json_response({"error": "not_found", "id": str(id)})
         data = c.query(
             "reportComments",
             REPORT_COMMENTS_QUERY,
-            {"id": str(id), "first": min(max(1, int(limit)), 100)},
+            {"id": rid, "first": min(max(1, int(limit)), 100)},
         )
         rc = data.get("reportComments") or {}
         rows = [parse_comment(n) for n in (rc.get("nodes") or [])[: max(1, int(limit))]]
         return json_response({"comments": rows, "count": len(rows)})
 
     @tool()
-    def plex_issues_reply(id: str, message: str) -> str:
+    def plex_issues_reply(id: int | str, message: str) -> str:
         """Post a comment reply on a Reported Issue (OWNER ACTION — requires admin approval)."""
         if not str(message).strip():
             return json.dumps({"error": "message_required", "detail": "Reply text is empty."})
+        rid = _resolve_report_id(c, id)
+        if rid is None:
+            return json_response({"error": "not_found", "id": str(id)})
         data = c.query(
             "createReportComment",
             CREATE_REPORT_COMMENT_MUTATION,
-            {"input": {"message": str(message), "report": str(id)}},
+            {"input": {"message": str(message), "report": rid}},
         )
         node = data.get("createReportComment")
         if node is None:
-            return json_response({"error": "not_found", "id": str(id)})
+            return json_response({"error": "not_found", "id": rid})
         # Do NOT re-fetch via commentByID: it can 404 briefly ("Comment not found")
         # even though the mutation succeeded (captured live 2026-11-05).
         user = node.get("user") or {}
