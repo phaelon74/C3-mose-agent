@@ -8,10 +8,10 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from plex_issues_diagnostics.client import (
+    CREATE_REPORT_COMMENT_MUTATION,
+    REPORTS_QUERY,
     REPORT_BY_ID_QUERY,
     REPORT_COMMENTS_QUERY,
-    REPORTS_QUERY,
-    PlexIssuesClient,
     json_response,
     parse_comment,
     parse_report,
@@ -72,5 +72,29 @@ def build_plex_issues_app(c: PlexIssuesClient) -> FastMCP:
         rc = data.get("reportComments") or {}
         rows = [parse_comment(n) for n in (rc.get("nodes") or [])[: max(1, int(limit))]]
         return json_response({"comments": rows, "count": len(rows)})
+
+    @tool()
+    def plex_issues_reply(id: str, message: str) -> str:
+        """Post a comment reply on a Reported Issue (OWNER ACTION — requires admin approval)."""
+        if not str(message).strip():
+            return json.dumps({"error": "message_required", "detail": "Reply text is empty."})
+        data = c.query(
+            "createReportComment",
+            CREATE_REPORT_COMMENT_MUTATION,
+            {"input": {"message": str(message), "report": str(id)}},
+        )
+        node = data.get("createReportComment")
+        if node is None:
+            return json_response({"error": "not_found", "id": str(id)})
+        # Do NOT re-fetch via commentByID: it can 404 briefly ("Comment not found")
+        # even though the mutation succeeded (captured live 2026-11-05).
+        user = node.get("user") or {}
+        return json_response({
+            "id": node.get("id") or "",
+            "status": node.get("status") or "",
+            "date": node.get("date") or "",
+            "message": node.get("message") or "",
+            "user": user.get("username") or user.get("displayName") or "",
+        })
 
     return mcp

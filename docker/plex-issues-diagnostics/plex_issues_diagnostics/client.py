@@ -22,6 +22,12 @@ REPORT_BY_ID_QUERY = (
     "user { id avatar username displayName isMuted isBlocked } url date commentCount } }"
 )
 
+CREATE_REPORT_COMMENT_MUTATION = (
+    "mutation createReportComment($input: CreateReportCommentInput!) { "
+    "createReportComment(input: $input) { __typename date id message status "
+    "user { id avatar username displayName isHidden isMuted isBlocked } } }"
+)
+
 REPORT_COMMENTS_QUERY = (
     "query reportComments($id: ID!, $first: PaginationInt, $after: String) { "
     "reportComments(id: $id, first: $first, after: $after) { nodes { id message "

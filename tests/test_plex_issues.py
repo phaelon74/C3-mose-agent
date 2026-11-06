@@ -47,7 +47,8 @@ class FakeClient:
             return {"reportByID": self.single}
         if operation == "reportComments":
             return {"reportComments": self.comments}
-        raise AssertionError(f"unexpected operation {operation}")
+        if operation == "createReportComment":
+            return {"createReportComment": self.single}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -116,6 +117,37 @@ def test_get_returns_compact_row() -> None:
     assert data["ratingKey"] == 407269
     assert c.calls[0] == {"operation": "reportByID", "variables": {"id": "be6c0b58"}}
 
+
+def test_reply_posts_mutation_payload() -> None:
+    from plex_issues_diagnostics.mcp_server import build_plex_issues_app
+
+    c = FakeClient(single={"id": "c-new", "status": "PUBLISHED", "date": "2026-11-06T00:43:27Z",
+                           "message": "Understood.", "user": {"username": "MKEcloud"}})
+    app = build_plex_issues_app(c)
+    fn = app._tool_manager._tools["plex_issues_reply"].fn  # noqa: SLF001
+    out = json.loads(fn(id="rep-1", message="Understood.  We'll take care of it."))
+    assert out["status"] == "PUBLISHED"
+    assert out["user"] == "MKEcloud"
+    assert c.calls[0]["operation"] == "createReportComment"
+    assert c.calls[0]["variables"] == {"input": {"message": "Understood.  We'll take care of it.",
+                                                 "report": "rep-1"}}
+
+
+def test_reply_rejects_empty_message() -> None:
+    from plex_issues_diagnostics.mcp_server import build_plex_issues_app
+
+    c = FakeClient(single=None)
+    app = build_plex_issues_app(c)
+    fn = app._tool_manager._tools["plex_issues_reply"].fn  # noqa: SLF001
+    assert json.loads(fn(id="rep-1", message="   "))["error"] == "message_required"
+    assert c.calls == []  # nothing sent to plex.tv
+
+
+def test_reply_is_write_classified() -> None:
+    from mose import mcp_write_policy as mp
+
+    assert mp.classify_mcp_tool("plex-issues", "plex_issues_reply") == "write"
+    assert mp.classify_mcp_tool("plex-issues", "plex_issues_list") == "read"
 
 def test_get_not_found() -> None:
     from plex_issues_diagnostics.mcp_server import build_plex_issues_app
